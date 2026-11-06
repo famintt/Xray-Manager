@@ -256,6 +256,7 @@ start_token_tunnel() {
   TUNNEL_TOKEN="${token}" nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" run \
     >>"${log_file}" 2>&1 </dev/null &
   write_pid_file "${pid_file}" "$!"
+  date +%s >"${RUNTIME_DIR}/${tag}.started_at" 2>/dev/null || true
 }
 
 ensure_argo_nodes() {
@@ -321,17 +322,47 @@ ensure_argo_nodes() {
   done < <(node_meta_bulk)
 }
 
-# 5.4：token 固定隧道的健康探活——endpoint_domain:443 连不上且连续
-# XM_TUNNEL_PROBE_LIMIT（默认 2）轮失败即 kill 进程，交由退避重启路径拉起。
+# 5.4：token 固定隧道的健康探活。
+# 不能只看公网 endpoint_domain:443：该探测会受本机 DNS/出网、Cloudflare 边缘
+# 和隧道刚启动尚未注册影响；旧逻辑两轮失败就 SIGTERM，实测把已注册的健康隧道
+# 每两分钟杀掉一次，表现为 Argo 永久 530。
+# 现在的判定：
+#   1) 启动后 XM_TUNNEL_PROBE_GRACE 秒内不判死（cloudflared 注册常需 60-90s）；
+#   2) 日志出现 Registered tunnel connection 且没有 terminal 事件 -> 健康；
+#   3) 公网 443 探测仅作告警，不作为杀进程依据；
+#   4) 只有 grace 后仍无注册、或日志明确 no more connections/Tunnel server stopped
+#      才累计失败并按 XM_TUNNEL_PROBE_LIMIT 退避重启。
 probe_token_tunnel() {
   local tag="$1"
-  local domain fail_file fails
+  local domain fail_file fails now started_at grace elapsed log_file
   domain="$(node_value "$tag" "endpoint_domain")"
   [ -n "${domain}" ] || return 0
-  if probe_tcp_port "${domain}" 443 3; then
+
+  log_file="${LOG_DIR}/${tag}.cloudflared.log"
+  grace="${XM_TUNNEL_PROBE_GRACE:-180}"
+  now="$(date +%s 2>/dev/null || printf 0)"
+  started_at="$(tr -dc '0-9' <"${RUNTIME_DIR}/${tag}.started_at" 2>/dev/null | head -c 12 || true)"
+  started_at="${started_at:-0}"
+  if [ "${started_at}" -eq 0 ] && [ -f "${log_file}" ]; then
+    started_at="$(stat -c %Y "${log_file}" 2>/dev/null || printf 0)"
+  fi
+  if [ "${started_at}" -gt 0 ] && [ "${now}" -gt 0 ]; then
+    elapsed=$((now - started_at))
+    if [ "${elapsed}" -lt "${grace}" ]; then
+      return 0
+    fi
+  fi
+
+  if grep -q 'Registered tunnel connection' "${log_file}" 2>/dev/null &&
+     ! tail -n 80 "${log_file}" 2>/dev/null | grep -qE 'no more connections active|Tunnel server stopped'; then
+    # 已注册连接：公网 443 探测失败可能只是本机 DNS/边缘策略，保留进程。
+    if ! probe_tcp_port "${domain}" 443 3; then
+      print_warn "token 隧道 ${tag} 已注册，但本机探测 ${domain}:443 失败；保留隧道，稍后复核。"
+    fi
     rm -f "${RUNTIME_DIR}/${tag}.tunnel_probe_fail"
     return 0
   fi
+
   fail_file="${RUNTIME_DIR}/${tag}.tunnel_probe_fail"
   fails="$(tr -dc '0-9' <"${fail_file}" 2>/dev/null || true)"
   fails="${fails:-0}"
@@ -339,12 +370,12 @@ probe_token_tunnel() {
   printf '%s' "${fails}" >"${fail_file}"
   chmod 600 "${fail_file}" 2>/dev/null || true
   if [ "${fails}" -ge "${XM_TUNNEL_PROBE_LIMIT:-2}" ]; then
-    print_warn "token 隧道 ${tag} 连续 ${fails} 轮探活失败（${domain}:443 不可达），判定假活，准备退避重启。"
+    print_warn "token 隧道 ${tag} 连续 ${fails} 轮无注册连接（${domain}:443），判定假活，准备退避重启。"
     rm -f "${fail_file}"
     kill_pid_file "${RUNTIME_DIR}/${tag}.pid" "${CLOUDFLARED_BIN}"
     return 1
   fi
-  print_warn "token 隧道 ${tag} 第 ${fails}/${XM_TUNNEL_PROBE_LIMIT:-2} 轮探活失败（${domain}:443 不可达）。"
+  print_warn "token 隧道 ${tag} 第 ${fails}/${XM_TUNNEL_PROBE_LIMIT:-2} 轮无注册连接（${domain}:443 不可达）。"
   return 0
 }
 

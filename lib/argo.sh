@@ -354,6 +354,7 @@ start_argo_node() {
     TUNNEL_TOKEN="${token}" nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" run \
       >>"${log_file}" 2>&1 </dev/null &
     write_pid_file "${pid_file}" "$!"
+    date +%s >"${BASE_DIR}/runtime/${tag}.started_at" 2>/dev/null || true
     # L13：token 模式下 cloudflared 全程静默（无 trycloudflare 域名可展示），
     # 对 endpoint_domain:443 快速探测一次给安装者即时反馈；刚启动时公网解析未就绪
     # 属正常，仅告警不阻断。
