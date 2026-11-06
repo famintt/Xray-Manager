@@ -215,6 +215,19 @@
           <div class="pitem"><label>TUIC v5（官方） <span class="pill">tupt</span></label><input type="text" class="port-input" id="tupt" placeholder="如 11444，或点 🎲 随机" inputmode="numeric"></div>
           <div class="pitem"><label>Hysteria2（官方） <span class="pill">hypt</span></label><input type="text" class="port-input" id="hypt" placeholder="如 11443，或点 🎲 随机" inputmode="numeric"></div>
         </div>
+        <div class="row">
+          <label>XHTTP 模式 <span class="pill">XM_XHTTP_MODE</span></label>
+          <div class="ctl">
+            <select id="xhttp_mode" class="has-hint">
+              <option value="" selected>按传输自动（Argo=packet-up，直连/CDN=stream-one）</option>
+              <option value="stream-one">stream-one（单请求流式，适合直连/CDN）</option>
+              <option value="stream-up">stream-up（上行/下行分离）</option>
+              <option value="packet-up">packet-up（兼容性最好，适合 Argo）</option>
+              <option value="auto">auto（Xray 自动选择）</option>
+            </select>
+            <span class="hint-inline">按传输自动时，Argo 用 packet-up，直连/CDN 用 stream-one；默认 1ms、64KB、64 缓冲</span>
+          </div>
+        </div>
       </section>
 
       <section class="card">
@@ -733,6 +746,9 @@
     }
     // 直连协议端口
     ['vlrt', 'xrpt', 'grpt', 'wspt', 'xwpt', 'gwpt', 'tupt', 'hypt'].forEach(function (k) { numEnv(k, k, envs); });
+    // XHTTP 调优：留空=按传输自动（Argo=packet-up，直连/CDN=stream-one）
+    var xhttpMode = val('xhttp_mode');
+    if (xhttpMode) envs.push(['XM_XHTTP_MODE', qv(xhttpMode)]);
     // Argo（默认 XHTTP；argo_cdn_host/argo_cdn_port 独立于 CDN）
     if (val('tupt')) {
       strEnv('tu_sni', 'tu_sni', envs);

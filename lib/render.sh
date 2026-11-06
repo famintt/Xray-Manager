@@ -28,6 +28,55 @@ xray_validate_config() {
   "${XRAY_BIN}" run -test -c "${file}" >/dev/null 2>&1
 }
 
+# XHTTP 调优参数：直连/CDN 默认 stream-one（单请求/长响应）；
+# Argo 经 cloudflared 回源不支持全双工，默认 packet-up。
+# 可用 XM_XHTTP_MODE 强制覆盖全部场景；实际值写入服务端配置，链接从配置回读，
+# 因此 xm list 不依赖当前 shell 的环境变量。
+xhttp_mode_value() {
+  local scope="${1:-direct}" mode="${XM_XHTTP_MODE:-}"
+  if [ -z "${mode}" ]; then
+    case "${scope}" in
+      argo) mode="packet-up" ;;
+      *) mode="stream-one" ;;
+    esac
+  fi
+  case "${mode}" in
+    auto|packet-up|stream-up|stream-one) printf '%s' "${mode}" ;;
+    *) printf '%s' "stream-one" ;;
+  esac
+}
+
+xhttp_positive_env() {
+  local key="$1" default="$2" min="$3" max="$4" value
+  value="${!key:-}"
+  if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${default}"
+    return 0
+  fi
+  if [ "${value}" -lt "${min}" ]; then
+    printf '%s' "${min}"
+  elif [ "${value}" -gt "${max}" ]; then
+    printf '%s' "${max}"
+  else
+    printf '%s' "${value}"
+  fi
+}
+
+xhttp_extra_json() {
+  local min max buffered
+  min="$(xhttp_positive_env XM_XHTTP_SC_MIN_POSTS_INTERVAL_MS 1 0 1000)"
+  max="$(xhttp_positive_env XM_XHTTP_SC_MAX_EACH_POST_BYTES 65536 1024 1048576)"
+  buffered="$(xhttp_positive_env XM_XHTTP_SC_MAX_BUFFERED_POSTS 64 1 1024)"
+  jq -cn --argjson min "${min}" --argjson max "${max}" --argjson buffered "${buffered}" \
+    '{scMinPostsIntervalMs:$min,scMaxEachPostBytes:$max,scMaxBufferedPosts:$buffered}'
+}
+
+xhttp_settings_json() {
+  local path="$1" host="$2" scope="${3:-direct}"
+  xhttp_extra_json | jq -c --arg p "${path}" --arg h "${host}" --arg mode "$(xhttp_mode_value "${scope}")" \
+    '{path:$p,host:$h,mode:$mode} + .'
+}
+
 # 与 sbm 的 tcp_fast_open/tcp_keep_alive 对齐；BBR 仅在内核实际可用时写入，
 # 避免精简 NAT 内核因不存在的拥塞算法导致 Xray 拒绝启动。
 _xray_sockopt_json() {
@@ -123,13 +172,13 @@ node_meta_array() {
 
 _vless_inbound() {
   local tag="$1" name="$2" port="$3" uuid="$4" network="$5" security="$6"
-  local sni="$7" path="$8" private_key="$9" short_id="${10}" cert_file="${11}" key_file="${12}" flow="${13}"
+  local sni="$7" path="$8" private_key="$9" short_id="${10}" cert_file="${11}" key_file="${12}" flow="${13}" xhttp_scope="${14:-direct}"
   local short_ids_json='[]' alpn_json='["h2","http/1.1"]' stream='{}' client='{}' sockopt_json
   [ -n "${flow}" ] && client="$(jq -n --arg u "$uuid" --arg n "$name" --arg f "$flow" '{id:$u,name:$n,flow:$f}')" || client="$(jq -n --arg u "$uuid" --arg n "$name" '{id:$u,name:$n}')"
   [ -n "${short_id}" ] && short_ids_json="$(printf '%s' "$short_id" | jq -R 'split(",")|map(select(.!=""))')"
   case "${network}" in
     ws) stream="$(jq -n --arg p "$path" '{network:"ws",wsSettings:{path:$p}}')" ;;
-    xhttp) stream="$(jq -n --arg p "$path" --arg h "$sni" '{network:"xhttp",xhttpSettings:{path:$p,host:$h,mode:"auto"}}')" ;;
+    xhttp) stream="$(jq -n --argjson xs "$(xhttp_settings_json "$path" "$sni" "$xhttp_scope")" '{network:"xhttp",xhttpSettings:$xs}')" ;;
     grpc) stream="$(jq -n --arg p "${path#/}" '{network:"grpc",grpcSettings:{serviceName:$p}}')" ;;
     tcp|raw) stream='{"network":"tcp"}' ;;
     *) stream='{"network":"tcp"}' ;;
@@ -168,18 +217,18 @@ render_inbound_for_tag() {
     vless-reality)
       _vless_inbound "$tag" "$name" "$port" "$uuid" tcp reality "$reality_server" "" "$private_key" "$short_id" "" "" "xtls-rprx-vision" ;;
     vless-xhttp-reality)
-      _vless_inbound "$tag" "$name" "$port" "$uuid" xhttp reality "$reality_server" "$ws_path" "$private_key" "$short_id" "" "" "" ;;
+      _vless_inbound "$tag" "$name" "$port" "$uuid" xhttp reality "$reality_server" "$ws_path" "$private_key" "$short_id" "" "" "" "direct" ;;
     vless-grpc-reality)
       _vless_inbound "$tag" "$name" "$port" "$uuid" grpc reality "$reality_server" "$ws_path" "$private_key" "$short_id" "" "" "" ;;
     vless-ws-cdn|vless-xhttp-cdn|vless-grpc-cdn)
       network="${protocol#vless-}"; network="${network%-cdn}"
       sni="${cdn_sni:-$preferred_domain}"
-      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" tls "$sni" "$ws_path" "" "" "$certificate_path" "$key_path" "" ;;
+      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" tls "$sni" "$ws_path" "" "" "$certificate_path" "$key_path" "" "cdn" ;;
     vless-ws-argo|vless-xhttp-argo|vless-grpc-argo)
       network="${protocol#vless-}"; network="${network%-argo}"
       # XHTTP over Argo: Cloudflare 回源会保留 Host，服务端必须与客户端 host 一致。
       sni="${endpoint_domain:-}"
-      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" none "$sni" "$ws_path" "" "" "" "" "" ;;
+      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" none "$sni" "$ws_path" "" "" "" "" "" "argo" ;;
     tuic-v5|hy2)
       # 官方 TUIC v5 / Hysteria2 由 sidecar 核心处理，不写入 Xray 配置。
       return 0 ;;

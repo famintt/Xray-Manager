@@ -2,11 +2,35 @@
 set -eEuo pipefail
 umask 077
 
+# 以服务端实际配置为准生成 XHTTP 链接，避免 xm list 时环境变量丢失导致
+# mode / sc* 与服务端不一致。
+xhttp_link_params() {
+  local tag="$1" cfg mode min max buffered
+  cfg=""
+  if [ -r "${CONFIG_FILE:-}" ]; then
+    cfg="$(jq -c --arg tag "$tag" '
+      .inbounds[]? | select(.tag == $tag and .streamSettings.network == "xhttp")
+      | .streamSettings.xhttpSettings // empty
+    ' "${CONFIG_FILE}" 2>/dev/null | head -n1 || true)"
+  fi
+  if [ -n "${cfg}" ]; then
+    mode="$(printf '%s' "${cfg}" | jq -r '.mode // "stream-one"')"
+    min="$(printf '%s' "${cfg}" | jq -r '.scMinPostsIntervalMs // 1')"
+    max="$(printf '%s' "${cfg}" | jq -r '.scMaxEachPostBytes // 65536')"
+    buffered="$(printf '%s' "${cfg}" | jq -r '.scMaxBufferedPosts // 64')"
+  else
+    mode="$(xhttp_mode_value)"
+    min="1"; max="65536"; buffered="64"
+  fi
+  printf '%s\t%s\n' "${mode}" "$(jq -cn --argjson min "${min}" --argjson max "${max}" --argjson buffered "${buffered}" \
+    '{scMinPostsIntervalMs:$min,scMaxEachPostBytes:$max,scMaxBufferedPosts:$buffered}')"
+}
+
 build_share_link() {
   local tag="$1" public_ip="${2:-}"
   local protocol name port host uuid password username reality_server public_key short_id
   local preferred_domain host_domain ws_path ws_mode cdn_port cdn_sni certificate_path certificate_mode endpoint_domain
-  local sni path transport hostpart enc_name
+  local sni path transport hostpart enc_name xhttp_mode xhttp_extra
   node_meta_array "$tag"
   protocol="${NODE_META[0]}"; name="${NODE_META[1]}"; port="${NODE_META[2]}"
   uuid="${NODE_META[3]}"; password="${NODE_META[4]}"; public_key="${NODE_META[6]}"
@@ -40,8 +64,10 @@ build_share_link() {
         printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=grpc&serviceName=%s#%s' \
           "$uuid" "$host" "$port" "$e_sni" "$e_pbk" "$e_sid" "${e_path#%2F}" "$enc_name"
       else
-        printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=xhttp&path=%s&host=%s&mode=auto#%s' \
-          "$uuid" "$host" "$port" "$e_sni" "$e_pbk" "$e_sid" "$e_path" "$e_host" "$enc_name"
+        IFS=$'\t' read -r xhttp_mode xhttp_extra <<< "$(xhttp_link_params "$tag")"
+        mapfile -t enc < <(url_encode_many "$reality_server" "$public_key" "$short_id" "$path" "$reality_server" "$xhttp_mode" "$xhttp_extra")
+        printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=xhttp&path=%s&host=%s&mode=%s&extra=%s#%s' \
+          "$uuid" "$host" "$port" "$e_sni" "$e_pbk" "$e_sid" "$e_path" "$e_host" "${enc[5]:-}" "${enc[6]:-}" "$enc_name"
       fi ;;
     vless-ws-cdn|vless-xhttp-cdn|vless-grpc-cdn)
       transport="${protocol#vless-}"; transport="${transport%-cdn}"
@@ -58,8 +84,10 @@ build_share_link() {
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=grpc&serviceName=%s#%s' \
           "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "${e_path#%2F}" "$enc_name"
       else
-        printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=auto#%s' \
-          "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "$e_path" "$e_host" "$enc_name"
+        IFS=$'\t' read -r xhttp_mode xhttp_extra <<< "$(xhttp_link_params "$tag")"
+        mapfile -t enc < <(url_encode_many "$sni" "$sni" "$path" "$xhttp_mode" "$xhttp_extra")
+        printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=%s&extra=%s#%s' \
+          "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "$e_path" "$e_host" "${enc[3]:-}" "${enc[4]:-}" "$enc_name"
       fi ;;
     vless-ws-argo|vless-xhttp-argo|vless-grpc-argo)
       transport="${protocol#vless-}"; transport="${transport%-argo}"
@@ -81,8 +109,10 @@ build_share_link() {
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=grpc&serviceName=%s#%s' \
           "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "${e_path#%2F}" "$enc_name"
       else
-        printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=auto#%s' \
-          "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "$e_path" "$e_host" "$enc_name"
+        IFS=$'\t' read -r xhttp_mode xhttp_extra <<< "$(xhttp_link_params "$tag")"
+        mapfile -t enc < <(url_encode_many "$endpoint_domain" "$endpoint_domain" "$path" "$xhttp_mode" "$xhttp_extra")
+        printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=%s&extra=%s#%s' \
+          "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "$e_path" "$e_host" "${enc[3]:-}" "${enc[4]:-}" "$enc_name"
       fi ;;
     tuic-v5)
       local tls_server="${NODE_META[9]:-}" e_uuid e_password e_sni e_name insecure=""

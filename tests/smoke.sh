@@ -10,6 +10,7 @@ export LIB_DIR="${LIB_DIR:-${BASE_DIR}/lib}"
 export XRAY_BIN="${XRAY_BIN:-/mnt/d/AI/DSH/.sbm_test/xray-linux/xray}"
 export TUIC_BIN="${TUIC_BIN:-/bin/true}"
 export HYSTERIA_BIN="${HYSTERIA_BIN:-/bin/true}"
+unset XM_XHTTP_MODE
 
 rm -rf "${BASE_DIR}"
 mkdir -p "${BASE_DIR}"/{certs,logs,runtime,backups}
@@ -25,10 +26,11 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v1.0.0"
+check_eq "版本" "$(cat VERSION)" "v1.1.0"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
+check_contains "UI 有 XHTTP 模式" "$(cat interface/index.html)" 'id="xhttp_mode"'
 check_contains "UI 有 Vision 标签" "$(cat interface/index.html)" 'VLESS+Vision+Reality'
 if grep -q 'vx_security' interface/index.html; then fail "UI 不应有 vx_security"; else pass "UI 无 XUDP 安全层"; fi
 if grep -q 'SOCKS5' interface/index.html; then fail "UI 不应有 SOCKS5"; else pass "UI 无 SOCKS5"; fi
@@ -73,6 +75,12 @@ check_eq "node_meta UUID" "$(node_meta p1 | sed -n '4p')" "11111111-1111-1111-11
 for tag in p1 p2 p3 p4 p5 p6 p7 p8 p9; do
   if render_inbound_for_tag "$tag" >/tmp/xm-${tag}.json 2>/tmp/xm-${tag}.err; then pass "render ${tag}"; else fail "render ${tag}: $(cat /tmp/xm-${tag}.err)"; fi
 done
+check_eq "XHTTP 默认模式" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.mode')" "stream-one"
+check_eq "XHTTP CDN 模式" "$(render_inbound_for_tag p5 | jq -r '.streamSettings.xhttpSettings.mode')" "stream-one"
+check_eq "XHTTP Argo 模式" "$(render_inbound_for_tag p8 | jq -r '.streamSettings.xhttpSettings.mode')" "packet-up"
+check_eq "XHTTP 最小 POST 间隔" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMinPostsIntervalMs')" "1"
+check_eq "XHTTP 单 POST 上限" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMaxEachPostBytes')" "65536"
+check_eq "XHTTP 缓冲 POST 数" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMaxBufferedPosts')" "64"
 check_eq "TUIC/HY 不写入 Xray" "$(render_inbound_for_tag p10 2>/dev/null)$(render_inbound_for_tag p11 2>/dev/null)" ""
 render_config
 check_eq "Xray inbounds 数量" "$(jq '.inbounds|length' "${CONFIG_FILE}")" "9"
@@ -84,6 +92,9 @@ set_setting server_ip 203.0.113.10
 links="$(for tag in p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11; do build_share_link "$tag"; printf '\n'; done)"
 check_contains "Vision Reality 链接" "$links" 'flow=xtls-rprx-vision'
 check_contains "XHTTP Reality 链接" "$links" 'type=xhttp'
+check_eq "XHTTP stream-one 链接数量" "$(printf '%s' "$links" | grep -o 'mode=stream-one' | wc -l | tr -d ' ')" "2"
+check_eq "XHTTP packet-up 链接数量" "$(printf '%s' "$links" | grep -o 'mode=packet-up' | wc -l | tr -d ' ')" "1"
+check_contains "XHTTP 链接 extra" "$links" 'extra=%7B%22scMinPostsIntervalMs%22'
 check_contains "gRPC Reality 链接" "$links" 'type=grpc&serviceName='
 check_contains "WS CDN 链接" "$links" 'type=ws'
 check_contains "XHTTP CDN 链接" "$links" 'path=%2Fxh'
