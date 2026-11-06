@@ -219,13 +219,13 @@
           <label>XHTTP 模式 <span class="pill">XM_XHTTP_MODE</span></label>
           <div class="ctl">
             <select id="xhttp_mode" class="has-hint">
-              <option value="" selected>按传输自动（Argo=packet-up，直连/CDN=stream-one）</option>
-              <option value="stream-one">stream-one（单请求流式，适合直连/CDN）</option>
-              <option value="stream-up">stream-up（上行/下行分离）</option>
-              <option value="packet-up">packet-up（兼容性最好，适合 Argo）</option>
-              <option value="auto">auto（Xray 自动选择）</option>
+              <option value="" selected>auto（稳定，默认，不写额外参数）</option>
+              <option value="auto">auto（显式写入 XM_XHTTP_MODE=auto）</option>
+              <option value="packet-up">packet-up（Argo 可选，兼容性较好）</option>
+              <option value="stream-one">stream-one（fast 实验，直连/CDN）</option>
+              <option value="stream-up">stream-up（fast 实验）</option>
             </select>
-            <span class="hint-inline">按传输自动时，Argo 用 packet-up，直连/CDN 用 stream-one；默认 1ms、64KB、64 缓冲</span>
+            <span class="hint-inline">默认 auto，且不写 sc* 调优参数，与 1.0.0 稳定版一致；只有显式选择模式或设置 XM_XHTTP_SC_* 才启用 fast 参数</span>
           </div>
         </div>
       </section>
@@ -746,7 +746,7 @@
     }
     // 直连协议端口
     ['vlrt', 'xrpt', 'grpt', 'wspt', 'xwpt', 'gwpt', 'tupt', 'hypt'].forEach(function (k) { numEnv(k, k, envs); });
-    // XHTTP 调优：留空=按传输自动（Argo=packet-up，直连/CDN=stream-one）
+    // XHTTP 调优：留空=auto（稳定，不写额外参数）；显式选择才覆盖
     var xhttpMode = val('xhttp_mode');
     if (xhttpMode) envs.push(['XM_XHTTP_MODE', qv(xhttpMode)]);
     // Argo（默认 XHTTP；argo_cdn_host/argo_cdn_port 独立于 CDN）

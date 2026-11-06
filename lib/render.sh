@@ -28,21 +28,16 @@ xray_validate_config() {
   "${XRAY_BIN}" run -test -c "${file}" >/dev/null 2>&1
 }
 
-# XHTTP 调优参数：直连/CDN 默认 stream-one（单请求/长响应）；
-# Argo 经 cloudflared 回源不支持全双工，默认 packet-up。
-# 可用 XM_XHTTP_MODE 强制覆盖全部场景；实际值写入服务端配置，链接从配置回读，
-# 因此 xm list 不依赖当前 shell 的环境变量。
+# XHTTP 默认与 v1.0.0 保持一致：mode=auto、不写 sc*。
+# XM_XHTTP_MODE / XM_XHTTP_SC_* 仍作为显式的 fast 覆盖；默认不启用。
 xhttp_mode_value() {
   local scope="${1:-direct}" mode="${XM_XHTTP_MODE:-}"
   if [ -z "${mode}" ]; then
-    case "${scope}" in
-      argo) mode="packet-up" ;;
-      *) mode="stream-one" ;;
-    esac
+    mode="auto"
   fi
   case "${mode}" in
     auto|packet-up|stream-up|stream-one) printf '%s' "${mode}" ;;
-    *) printf '%s' "stream-one" ;;
+    *) printf '%s' "auto" ;;
   esac
 }
 
@@ -64,11 +59,25 @@ xhttp_positive_env() {
 
 xhttp_extra_json() {
   local min max buffered
-  min="$(xhttp_positive_env XM_XHTTP_SC_MIN_POSTS_INTERVAL_MS 1 0 1000)"
-  max="$(xhttp_positive_env XM_XHTTP_SC_MAX_EACH_POST_BYTES 65536 1024 1048576)"
-  buffered="$(xhttp_positive_env XM_XHTTP_SC_MAX_BUFFERED_POSTS 64 1 1024)"
-  jq -cn --argjson min "${min}" --argjson max "${max}" --argjson buffered "${buffered}" \
-    '{scMinPostsIntervalMs:$min,scMaxEachPostBytes:$max,scMaxBufferedPosts:$buffered}'
+  local -a parts=()
+  if [ -n "${XM_XHTTP_SC_MIN_POSTS_INTERVAL_MS:-}" ]; then
+    min="$(xhttp_positive_env XM_XHTTP_SC_MIN_POSTS_INTERVAL_MS 30 0 1000)"
+    parts+=("\"scMinPostsIntervalMs\":${min}")
+  fi
+  if [ -n "${XM_XHTTP_SC_MAX_EACH_POST_BYTES:-}" ]; then
+    max="$(xhttp_positive_env XM_XHTTP_SC_MAX_EACH_POST_BYTES 1048576 1024 1048576)"
+    parts+=("\"scMaxEachPostBytes\":${max}")
+  fi
+  if [ -n "${XM_XHTTP_SC_MAX_BUFFERED_POSTS:-}" ]; then
+    buffered="$(xhttp_positive_env XM_XHTTP_SC_MAX_BUFFERED_POSTS 30 1 1024)"
+    parts+=("\"scMaxBufferedPosts\":${buffered}")
+  fi
+  if [ "${#parts[@]}" -eq 0 ]; then
+    printf '%s' '{}'
+    return 0
+  fi
+  local IFS=','
+  printf '{%s}\n' "${parts[*]}"
 }
 
 xhttp_settings_json() {

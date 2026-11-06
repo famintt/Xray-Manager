@@ -17,6 +17,7 @@ mkdir -p "${BASE_DIR}"/{certs,logs,runtime,backups}
 
 # shellcheck source=/dev/null
 source "${ROOT}/xm.sh"
+trap - ERR
 init_storage
 
 PASS=0
@@ -26,7 +27,7 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v1.1.0"
+check_eq "版本" "$(cat VERSION)" "v1.1.1"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -75,12 +76,14 @@ check_eq "node_meta UUID" "$(node_meta p1 | sed -n '4p')" "11111111-1111-1111-11
 for tag in p1 p2 p3 p4 p5 p6 p7 p8 p9; do
   if render_inbound_for_tag "$tag" >/tmp/xm-${tag}.json 2>/tmp/xm-${tag}.err; then pass "render ${tag}"; else fail "render ${tag}: $(cat /tmp/xm-${tag}.err)"; fi
 done
-check_eq "XHTTP 默认模式" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.mode')" "stream-one"
-check_eq "XHTTP CDN 模式" "$(render_inbound_for_tag p5 | jq -r '.streamSettings.xhttpSettings.mode')" "stream-one"
-check_eq "XHTTP Argo 模式" "$(render_inbound_for_tag p8 | jq -r '.streamSettings.xhttpSettings.mode')" "packet-up"
-check_eq "XHTTP 最小 POST 间隔" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMinPostsIntervalMs')" "1"
-check_eq "XHTTP 单 POST 上限" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMaxEachPostBytes')" "65536"
-check_eq "XHTTP 缓冲 POST 数" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMaxBufferedPosts')" "64"
+check_eq "XHTTP 默认模式" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.mode')" "auto"
+check_eq "XHTTP CDN 模式" "$(render_inbound_for_tag p5 | jq -r '.streamSettings.xhttpSettings.mode')" "auto"
+check_eq "XHTTP Argo 模式" "$(render_inbound_for_tag p8 | jq -r '.streamSettings.xhttpSettings.mode')" "auto"
+check_eq "XHTTP 默认无 sc 参数" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings | has("scMinPostsIntervalMs")')" "false"
+check_eq "XHTTP 默认无单 POST 上限" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings | has("scMaxEachPostBytes")')" "false"
+check_eq "XHTTP 默认无缓冲配置" "$(render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings | has("scMaxBufferedPosts")')" "false"
+check_eq "XHTTP 显式 fast 模式" "$(XM_XHTTP_MODE=stream-one render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.mode')" "stream-one"
+check_eq "XHTTP 显式 fast sc" "$(XM_XHTTP_MODE=stream-one XM_XHTTP_SC_MIN_POSTS_INTERVAL_MS=5 render_inbound_for_tag p2 | jq -r '.streamSettings.xhttpSettings.scMinPostsIntervalMs')" "5"
 check_eq "TUIC/HY 不写入 Xray" "$(render_inbound_for_tag p10 2>/dev/null)$(render_inbound_for_tag p11 2>/dev/null)" ""
 render_config
 check_eq "Xray inbounds 数量" "$(jq '.inbounds|length' "${CONFIG_FILE}")" "9"
@@ -92,9 +95,8 @@ set_setting server_ip 203.0.113.10
 links="$(for tag in p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11; do build_share_link "$tag"; printf '\n'; done)"
 check_contains "Vision Reality 链接" "$links" 'flow=xtls-rprx-vision'
 check_contains "XHTTP Reality 链接" "$links" 'type=xhttp'
-check_eq "XHTTP stream-one 链接数量" "$(printf '%s' "$links" | grep -o 'mode=stream-one' | wc -l | tr -d ' ')" "2"
-check_eq "XHTTP packet-up 链接数量" "$(printf '%s' "$links" | grep -o 'mode=packet-up' | wc -l | tr -d ' ')" "1"
-check_contains "XHTTP 链接 extra" "$links" 'extra=%7B%22scMinPostsIntervalMs%22'
+check_eq "XHTTP auto 链接数量" "$(printf '%s' "$links" | grep -o 'mode=auto' | wc -l | tr -d ' ')" "3"
+check_eq "XHTTP 链接无 extra" "$(printf '%s' "$links" | grep -o 'extra=' | wc -l | tr -d ' ')" "0"
 check_contains "gRPC Reality 链接" "$links" 'type=grpc&serviceName='
 check_contains "WS CDN 链接" "$links" 'type=ws'
 check_contains "XHTTP CDN 链接" "$links" 'path=%2Fxh'
