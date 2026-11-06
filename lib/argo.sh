@@ -184,24 +184,33 @@ argo_backoff_delay() {
 
 argo_edge_ip_version() {
   local has4 has6
-  # 边缘 IP 族选择：双栈环境交给 cloudflared --edge-ip-version auto（3.2）；
-  # 单栈环境先探测 Cloudflare 同族边缘可达性；探测失败时只在本机实际具备的
-  # IP 族内判断，绝不可翻转到本机没有的族（IPv4-only 主机回退 IPv6 必现
-  # "network is unreachable"，v1.5.8 实测根因）。
+  # 边缘 IP 族选择：优先 IPv4。很多 VPS 有公网 IPv6 地址和默认路由，但上游 IPv6
+  # 实际不通；cloudflared 的 auto 会优先 IPv6，表现为预检查失败/不注册/Argo 530。
+  # IPv4 可用时固定 4；仅 IPv6 的主机才用 6。可用 XM_CLOUDFLARED_EDGE_IP_VERSION
+  # 显式覆盖（auto/4/6）。
+  if [ -n "${XM_CLOUDFLARED_EDGE_IP_VERSION:-}" ]; then
+    case "${XM_CLOUDFLARED_EDGE_IP_VERSION}" in
+      4|6|auto) printf '%s' "${XM_CLOUDFLARED_EDGE_IP_VERSION}"; return 0 ;;
+    esac
+  fi
+
+  # 本机有全局 IPv4 就直接走 IPv4 边缘，不依赖外部 ipify（部分 VPS 无法访问，
+  # 会把双栈误判为单栈/auto；而 auto 在 IPv6 路由坏掉时又优先 IPv6）。
+  if command_exists ip && ip -4 addr show scope global 2>/dev/null | grep -q 'inet '; then
+    printf '4'
+    return 0
+  fi
+
   has4=false
   has6=false
   has_public_ipv4 && has4=true
   has_public_ipv6 && has6=true
 
-  if [ "${has4}" = "true" ] && [ "${has6}" = "true" ]; then
-    printf 'auto'
-    return 0
-  fi
   if [ "${has4}" = "true" ]; then
     if probe_edge_family "4"; then
       printf '4'
     else
-      print_warn "IPv4 边缘（region1.v2.argotunnel.com）不可达，本机无 IPv6，保持 IPv4 边缘。"
+      print_warn "IPv4 边缘（region1.v2.argotunnel.com）不可达，本机有 IPv4，保持 IPv4 边缘。"
       printf '4'
     fi
     return 0
