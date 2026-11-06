@@ -59,6 +59,7 @@ name='HK' xm rep
 | `hypt` | 官方 Hysteria2 端口（UDP） |
 | `argo=vlpt` | 启用 Argo；`argo_pt` 为本地端口，默认 8001 |
 | `argo_transport` | Argo 传输：`ws` / `xhttp` / `grpc`，默认 `xhttp` |
+| `argo_cdn_host` / `argo_cdn_port` | 可选 Argo 优选边缘地址/端口；只替换链接的连接地址，SNI/Host 仍用隧道域名 |
 | `vl_sni` / `xr_sni` / `gr_sni` | 三种 Reality 的 SNI，默认 `www.bing.com` |
 | `ws_sni` / `xw_sni` / `gw_sni` | 三种 CDN 的 SNI，默认 `www.apple.com` |
 | `tu_sni` / `hy_sni` | TUIC / Hysteria2 的 SNI，默认 `www.apple.com` |
@@ -70,7 +71,7 @@ name='HK' xm rep
 
 - Reality：`security=reality&pbk=&sid=&fp=chrome`；Vision 仅 `vless-reality` 带 `flow=xtls-rprx-vision`。
 - CDN：`security=tls`，客户端连接 `cdn_host:cdn_port`；`wspt/xwpt/gwpt` 是源站回源端口。
-- Argo：默认 `xhttp`，链接使用临时/固定隧道域名，端口 443；`argo_transport` 可切换。
+- Argo：默认 `xhttp`，链接地址优先用 `argo_cdn_host`（可选优选域名），没有时用固定/临时隧道域名；SNI 和 Host 始终用隧道域名，端口用 `argo_cdn_port`（默认 443）。`argo_transport` 可切换传输。
 - TUIC：`tuic://uuid:password@host:port?congestion_control=bbr&alpn=h3&sni=...&udp_relay_mode=native`
 - Hysteria2：`hysteria2://password@host:port?sni=...`
 - 自签证书默认追加 `insecure=1` / `allow_insecure=1`。
@@ -80,7 +81,9 @@ name='HK' xm rep
 - CDN 回源自签证书时，Cloudflare SSL/TLS 选 **Full**；选 **Full (Strict)** 需要 Origin CA 或受信证书。
 - `wspt/xwpt/gwpt` 不是 443 时，在 Cloudflare 添加 **Origin Rule**，把 443 回源改写到对应端口。
 - `cdn_host` 只是客户端连接的优选边缘地址；`ws_cdn_sni` 必须填**回源域名**，生成的链接会把它同时用作 SNI 和 Host。不要把优选域名填进 `ws_cdn_sni`，否则 XHTTP Host 与服务端不匹配。
-- Argo 临时隧道域名自动分配；固定隧道必须同时填 `endpoint_domain`（隧道域名）和 `argo_token`。生成链接里的地址应是该固定域名；若仍是 `*.trycloudflare.com`，说明节点的 `argo_mode` 被保存成了 `temp`，需重新执行 `xm rep`，不要只改界面。
+- Argo 临时隧道域名自动分配；固定隧道必须同时填 `endpoint_domain`（隧道域名）和 `argo_token`。生成链接里的地址默认应是该固定域名；若仍是 `*.trycloudflare.com`，说明节点的 `argo_mode` 被保存成了 `temp`，需重新执行 `xm rep`，不要只改界面。
+- 如果希望客户端连接 Cloudflare 优选地址，再填 `argo_cdn_host`（如 `cf.cnno.de`）；链接会变成 `@cf.cnno.de:443` 作为连接地址，但 `sni` 和 `host` 仍是 `endpoint_domain`（如 `yt.7168.dpdns.org`）。这样优选地址只负责接入边缘，Cloudflare 仍能按隧道域名回源。
+- 注意：`argo_cdn_host` 是**客户端连接地址**，不是隧道域名；不要把 `endpoint_domain` 改成优选域名，否则 cloudflared 的 ingress 和 TLS SNI 会对不上。`xm list` 是校验最终链接的最快方式。
 - Argo 默认使用 XHTTP；可在界面/命令行选择 WS 或 gRPC。Quick Tunnel 回源是 HTTP/1.1，实际优先 WS。
 
 ## 官方 TUIC / Hysteria2

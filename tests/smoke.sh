@@ -25,7 +25,7 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v0.10.2"
+check_eq "版本" "$(cat VERSION)" "v0.10.3"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -46,9 +46,9 @@ jq -n --arg c "$CRT" --arg k "$KEY" '{
   p4:{protocol:"vless-ws-cdn",name:"p4",port:21004,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"/ws",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
   p5:{protocol:"vless-xhttp-cdn",name:"p5",port:21005,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"/xh",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
   p6:{protocol:"vless-grpc-cdn",name:"p6",port:21006,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"svc",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
-  p7:{protocol:"vless-ws-argo",name:"p7",port:21007,ws_path:"/argo",endpoint_domain:"argo.example.com"},
-  p8:{protocol:"vless-xhttp-argo",name:"p8",port:21008,ws_path:"/argo-x",endpoint_domain:"argo.example.com"},
-  p9:{protocol:"vless-grpc-argo",name:"p9",port:21009,ws_path:"svc",endpoint_domain:"argo.example.com"},
+  p7:{protocol:"vless-ws-argo",name:"p7",port:21007,ws_path:"/argo",preferred_domain:"argo-edge.example.com",endpoint_domain:"argo.example.com"},
+  p8:{protocol:"vless-xhttp-argo",name:"p8",port:21008,ws_path:"/argo-x",preferred_domain:"argo-edge.example.com",endpoint_domain:"argo.example.com"},
+  p9:{protocol:"vless-grpc-argo",name:"p9",port:21009,ws_path:"svc",preferred_domain:"argo-edge.example.com",endpoint_domain:"argo.example.com"},
   p10:{protocol:"hy2",name:"p10",port:21010,tls_server:"www.apple.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k,up_mbps:200,down_mbps:200},
   p11:{protocol:"tuic-v5",name:"p11",port:21011,tls_server:"www.apple.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k}
 }' >"${NODES_FILE}"
@@ -91,8 +91,9 @@ check_contains "CDN 边缘地址" "$links" '@edge.example.com:443?'
 check_contains "CDN SNI 回源" "$links" 'sni=origin.example.com'
 check_contains "CDN Host 回源" "$links" 'host=origin.example.com'
 check_contains "Argo 链接" "$links" 'argo.example.com'
-check_contains "Argo 端口" "$links" '@argo.example.com:443?'
+check_contains "Argo 优选地址" "$links" '@argo-edge.example.com:443?'
 check_contains "Argo SNI 为域名" "$links" 'sni=argo.example.com'
+check_contains "Argo Host 为隧道域名" "$links" 'host=argo.example.com'
 if printf '%s' "$links" | grep -Fq '@:443'; then fail "Argo 链接出现空 host"; else pass "Argo host 非空"; fi
 if printf '%s' "$links" | grep -Fq 'sni=443'; then fail "Argo SNI 被端口污染"; else pass "Argo SNI 未被污染"; fi
 check_contains "Hysteria2 链接" "$links" 'hysteria2://'
@@ -110,10 +111,15 @@ export argo_mode=token endpoint_domain=argo.example.com argo_token=test-token
 export ENV_UUID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ENV_NAME=token-test
 export ENV_ARGO_CDN_HOST=cf.example.com ENV_CDN_HOST=cdn.example.com ENV_ARGO_CDN_PORT=443
 auto_add_argo 21012 >/dev/null 2>&1
-if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .argo_mode == "token" and .endpoint_domain == "argo.example.com")' "${NODES_FILE}" >/dev/null; then
+if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .argo_mode == "token" and .endpoint_domain == "argo.example.com" and .preferred_domain == "cf.example.com")' "${NODES_FILE}" >/dev/null; then
   pass "auto_add_argo token 模式"
 else
   fail "auto_add_argo token 模式被降级"
+fi
+if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .preferred_domain == "cf.example.com")' "${NODES_FILE}" >/dev/null; then
+  pass "auto_add_argo 优选地址"
+else
+  fail "auto_add_argo 优选地址丢失"
 fi
 
 if [ "${FAIL}" -gt 0 ]; then

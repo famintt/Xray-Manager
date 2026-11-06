@@ -68,18 +68,21 @@ build_share_link() {
       if [ -z "$endpoint_domain" ] || [ "$endpoint_domain" = "待分配.example.com" ]; then
         print_warn "节点 ${tag} 的 Argo 域名尚未分配，链接暂不可用。"; return 0
       fi
+      # Argo 优选域名只替换连接地址；隧道域名仍是 TLS SNI 和 HTTP Host，
+      # 否则 Cloudflare 边缘无法按 Host 回源，XHTTP/WS 会握手失败。
+      local argo_target="${preferred_domain:-$endpoint_domain}"
       local -a enc=()
       mapfile -t enc < <(url_encode_many "$endpoint_domain" "$endpoint_domain" "$path")
       local e_domain="${enc[0]:-}" e_host="${enc[1]:-}" e_path="${enc[2]:-}"
       if [ "$transport" = "ws" ]; then
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s' \
-          "$uuid" "$(wrap_host "$endpoint_domain")" "$argo_port" "$e_domain" "$e_host" "$e_path" "$enc_name"
+          "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "$e_host" "$e_path" "$enc_name"
       elif [ "$transport" = "grpc" ]; then
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=grpc&serviceName=%s#%s' \
-          "$uuid" "$(wrap_host "$endpoint_domain")" "$argo_port" "$e_domain" "${e_path#%2F}" "$enc_name"
+          "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "${e_path#%2F}" "$enc_name"
       else
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=auto#%s' \
-          "$uuid" "$(wrap_host "$endpoint_domain")" "$argo_port" "$e_domain" "$e_path" "$e_host" "$enc_name"
+          "$uuid" "$(wrap_host "$argo_target")" "$argo_port" "$e_domain" "$e_path" "$e_host" "$enc_name"
       fi ;;
     tuic-v5)
       local tls_server="${NODE_META[9]:-}" e_uuid e_password e_sni e_name insecure=""
