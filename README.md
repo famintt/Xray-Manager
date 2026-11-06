@@ -79,8 +79,9 @@ name='HK' xm rep
 
 - CDN 回源自签证书时，Cloudflare SSL/TLS 选 **Full**；选 **Full (Strict)** 需要 Origin CA 或受信证书。
 - `wspt/xwpt/gwpt` 不是 443 时，在 Cloudflare 添加 **Origin Rule**，把 443 回源改写到对应端口。
-- Argo 临时隧道域名自动分配；固定隧道需填 `endpoint_domain` 和 `argo_token`。
-- Argo 默认使用 XHTTP；可在界面/命令行选择 WS 或 gRPC。
+- `cdn_host` 只是客户端连接的优选边缘地址；`ws_cdn_sni` 必须填**回源域名**，生成的链接会把它同时用作 SNI 和 Host。不要把优选域名填进 `ws_cdn_sni`，否则 XHTTP Host 与服务端不匹配。
+- Argo 临时隧道域名自动分配；固定隧道必须同时填 `endpoint_domain`（隧道域名）和 `argo_token`。生成链接里的地址应是该固定域名；若仍是 `*.trycloudflare.com`，说明节点的 `argo_mode` 被保存成了 `temp`，需重新执行 `xm rep`，不要只改界面。
+- Argo 默认使用 XHTTP；可在界面/命令行选择 WS 或 gRPC。Quick Tunnel 回源是 HTTP/1.1，实际优先 WS。
 
 ## 官方 TUIC / Hysteria2
 

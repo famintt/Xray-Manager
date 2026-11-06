@@ -25,7 +25,7 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v0.10.0"
+check_eq "版本" "$(cat VERSION)" "v0.10.1"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -43,9 +43,9 @@ jq -n --arg c "$CRT" --arg k "$KEY" '{
   p1:{protocol:"vless-reality",name:"p1",port:21001,reality_server:"www.bing.com",public_key:"pk",short_id:"abcd"},
   p2:{protocol:"vless-xhttp-reality",name:"p2",port:21002,reality_server:"www.bing.com",public_key:"pk",short_id:"abcd",ws_path:"/x"},
   p3:{protocol:"vless-grpc-reality",name:"p3",port:21003,reality_server:"www.bing.com",public_key:"pk",short_id:"abcd",ws_path:"svc"},
-  p4:{protocol:"vless-ws-cdn",name:"p4",port:21004,preferred_domain:"cdn.example.com",host_domain:"cdn.example.com",ws_path:"/ws",ws_mode:"cdn",cdn_port:443,cdn_sni:"cdn.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
-  p5:{protocol:"vless-xhttp-cdn",name:"p5",port:21005,preferred_domain:"cdn.example.com",host_domain:"cdn.example.com",ws_path:"/xh",ws_mode:"cdn",cdn_port:443,cdn_sni:"cdn.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
-  p6:{protocol:"vless-grpc-cdn",name:"p6",port:21006,preferred_domain:"cdn.example.com",host_domain:"cdn.example.com",ws_path:"svc",ws_mode:"cdn",cdn_port:443,cdn_sni:"cdn.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
+  p4:{protocol:"vless-ws-cdn",name:"p4",port:21004,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"/ws",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
+  p5:{protocol:"vless-xhttp-cdn",name:"p5",port:21005,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"/xh",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
+  p6:{protocol:"vless-grpc-cdn",name:"p6",port:21006,preferred_domain:"edge.example.com",host_domain:"origin.example.com",ws_path:"svc",ws_mode:"cdn",cdn_port:443,cdn_sni:"origin.example.com",certificate_mode:"self-signed",certificate_path:$c,key_path:$k},
   p7:{protocol:"vless-ws-argo",name:"p7",port:21007,ws_path:"/argo",endpoint_domain:"argo.example.com"},
   p8:{protocol:"vless-xhttp-argo",name:"p8",port:21008,ws_path:"/argo-x",endpoint_domain:"argo.example.com"},
   p9:{protocol:"vless-grpc-argo",name:"p9",port:21009,ws_path:"svc",endpoint_domain:"argo.example.com"},
@@ -87,6 +87,9 @@ check_contains "XHTTP Reality 链接" "$links" 'type=xhttp'
 check_contains "gRPC Reality 链接" "$links" 'type=grpc&serviceName='
 check_contains "WS CDN 链接" "$links" 'type=ws'
 check_contains "XHTTP CDN 链接" "$links" 'path=%2Fxh'
+check_contains "CDN 边缘地址" "$links" '@edge.example.com:443?'
+check_contains "CDN SNI 回源" "$links" 'sni=origin.example.com'
+check_contains "CDN Host 回源" "$links" 'host=origin.example.com'
 check_contains "Argo 链接" "$links" 'argo.example.com'
 check_contains "Argo 端口" "$links" '@argo.example.com:443?'
 check_contains "Argo SNI 为域名" "$links" 'sni=argo.example.com'
@@ -101,6 +104,17 @@ export tupt=21011
 if auto_has_node_env; then pass "auto_has_node_env tupt"; else fail "auto_has_node_env tupt"; fi
 check_contains "auto_collect_specs tupt" "$(auto_collect_specs)" 'tuic-v5 21011'
 unset tupt
+
+# 回归：auto_add_argo 的 local 变量不得遮蔽同名环境变量，否则 token 会退化成 temp。
+export argo_mode=token endpoint_domain=argo.example.com argo_token=test-token
+export ENV_UUID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ENV_NAME=token-test
+export ENV_ARGO_CDN_HOST=cf.example.com ENV_CDN_HOST=cdn.example.com ENV_ARGO_CDN_PORT=443
+auto_add_argo 21012 >/dev/null 2>&1
+if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .argo_mode == "token" and .endpoint_domain == "argo.example.com")' "${NODES_FILE}" >/dev/null; then
+  pass "auto_add_argo token 模式"
+else
+  fail "auto_add_argo token 模式被降级"
+fi
 
 if [ "${FAIL}" -gt 0 ]; then
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"

@@ -46,18 +46,20 @@ build_share_link() {
     vless-ws-cdn|vless-xhttp-cdn|vless-grpc-cdn)
       transport="${protocol#vless-}"; transport="${transport%-cdn}"
       sni="${cdn_sni:-$preferred_domain}"; cdn_port="${cdn_port:-443}"
+      # CDN 地址用边缘优选域名；Host/SNI 必须用回源域名，否则 XHTTP 的 host 与服务端不匹配。
+      local cdn_target="${preferred_domain:-$sni}"
       local -a enc=()
-      mapfile -t enc < <(url_encode_many "$sni" "$preferred_domain" "$path")
+      mapfile -t enc < <(url_encode_many "$sni" "$sni" "$path")
       local e_sni="${enc[0]:-}" e_host="${enc[1]:-}" e_path="${enc[2]:-}"
       if [ "$transport" = "ws" ]; then
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=ws&host=%s&path=%s#%s' \
-          "$uuid" "$(wrap_host "$preferred_domain")" "$cdn_port" "$e_sni" "$e_host" "$e_path" "$enc_name"
+          "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "$e_host" "$e_path" "$enc_name"
       elif [ "$transport" = "grpc" ]; then
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=grpc&serviceName=%s#%s' \
-          "$uuid" "$(wrap_host "$preferred_domain")" "$cdn_port" "$e_sni" "${e_path#%2F}" "$enc_name"
+          "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "${e_path#%2F}" "$enc_name"
       else
         printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=chrome&type=xhttp&path=%s&host=%s&mode=auto#%s' \
-          "$uuid" "$(wrap_host "$preferred_domain")" "$cdn_port" "$e_sni" "$e_path" "$e_host" "$enc_name"
+          "$uuid" "$(wrap_host "$cdn_target")" "$cdn_port" "$e_sni" "$e_path" "$e_host" "$enc_name"
       fi ;;
     vless-ws-argo|vless-xhttp-argo|vless-grpc-argo)
       transport="${protocol#vless-}"; transport="${transport%-argo}"

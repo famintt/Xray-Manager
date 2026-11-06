@@ -157,7 +157,10 @@ auto_add_cdn() {
 }
 
 auto_add_argo() {
-  local port="$1" transport node_json secret_json tag uuid path endpoint_domain argo_mode argo_token
+  # 注意：不要声明名为 argo_mode/endpoint_domain/argo_token 的 local 变量。
+  # env_var 使用 Bash 间接展开；同名 local 会遮蔽环境变量，导致 token 模式被误判为 temp。
+  local port="$1" transport node_json secret_json tag uuid path
+  local node_argo_mode node_endpoint_domain node_argo_token
   local argo_host="${ENV_ARGO_CDN_HOST:-${ENV_CDN_HOST}}"
   transport="$(auto_argo_transport)"
   tag="$(generate_tag "vless-${transport}-argo")"
@@ -167,20 +170,20 @@ auto_add_argo() {
   ws) path="$(env_var "ws_path")"; path="${path:-$(random_ws_path)}" ;;
   *) path="$(env_var "xhttp_path")"; path="${path:-/$(generate_hex 4)}" ;;
   esac
-  argo_mode="$(env_var "argo_mode")"; argo_mode="${argo_mode:-temp}"
-  if [ "$argo_mode" = "token" ]; then
-    argo_token="$(env_var "argo_token")"
-    endpoint_domain="$(env_var "endpoint_domain")"
+  node_argo_mode="$(env_var "argo_mode")"; node_argo_mode="${node_argo_mode:-temp}"
+  if [ "$node_argo_mode" = "token" ]; then
+    node_argo_token="$(env_var "argo_token")"
+    node_endpoint_domain="$(env_var "endpoint_domain")"
   else
-    argo_mode="temp"; argo_token=""; endpoint_domain=""
+    node_argo_mode="temp"; node_argo_token=""; node_endpoint_domain=""
   fi
   node_json="$(jq -n \
     --arg protocol "vless-${transport}-argo" --arg name "$(auto_node_name "Argo")" \
     --argjson port "$port" --argjson cdn_port "${ENV_ARGO_CDN_PORT:-443}" --arg preferred_domain "$argo_host" \
-    --arg ws_path "$path" --arg argo_mode "$argo_mode" --arg endpoint_domain "$endpoint_domain" \
+    --arg ws_path "$path" --arg argo_mode "$node_argo_mode" --arg endpoint_domain "$node_endpoint_domain" \
     '{protocol:$protocol,name:$name,port:$port,preferred_domain:$preferred_domain,cdn_port:$cdn_port,
       ws_path:$ws_path,argo_mode:$argo_mode,endpoint_domain:$endpoint_domain}')"
-  secret_json="$(jq -n --arg uuid "$uuid" --arg argo_token "$argo_token" '{uuid:$uuid,argo_token:$argo_token}')"
+  secret_json="$(jq -n --arg uuid "$uuid" --arg argo_token "$node_argo_token" '{uuid:$uuid,argo_token:$argo_token}')"
   auto_save_node "$tag" "$node_json" "$secret_json"
 }
 

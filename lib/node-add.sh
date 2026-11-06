@@ -170,7 +170,6 @@ add_vless_grpc_cdn() { _add_vless_cdn "vless-grpc-cdn" 8445 "VLESS-gRPC-TLS-CDN"
 add_vless_argo() {
   local tag port name uuid transport preferred_domain ws_path argo_mode argo_token endpoint_domain node_json secret_json
   ensure_singbox_ready
-  tag="$(generate_tag "vless-${transport}-argo")"
   port="$(prompt_port 8001)"
   name="$(prompt_with_default "节点名称" "VLESS-XHTTP-Argo")"
   uuid="$(prompt_optional_value "UUID（留空自动生成）")"
@@ -180,6 +179,7 @@ add_vless_argo() {
   ws | grpc | xhttp) ;;
   *) transport="xhttp" ;;
   esac
+  tag="$(generate_tag "vless-${transport}-argo")"
   if [ "$transport" = "grpc" ]; then
     ws_path="$(prompt_with_default "gRPC serviceName" "xm-$(generate_hex 4)")"
   elif [ "$transport" = "ws" ]; then

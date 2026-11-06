@@ -47,10 +47,10 @@ umask 077
 
 REPO_OWNER="famintt"
 REPO_NAME="Xray-Manager"
-PROJECT_VERSION="v0.10.0"
-PACKAGE_NAME="xray-manager-v0.10.0.tar.gz"
+PROJECT_VERSION="v0.10.1"
+PACKAGE_NAME="xray-manager-v0.10.1.tar.gz"
 # 发布流程：scripts/build-release-bundle.sh 构建可复现 bundle，其 SHA256 与此处一致
-PACKAGE_SHA256="7b57247ca4ae338810ccfac8810593ae2dd4318a0885a5d7178a807d270bf562"
+PACKAGE_SHA256="2d1b0c53a4e70f961bd656467f7f7e35e2c0bbb2ccdf5989b3dda70c4faf6cc2"
 PACKAGE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${PROJECT_VERSION}/${PACKAGE_NAME}"
 
 INSTALL_BIN="/usr/local/bin/xm"
