@@ -7,7 +7,7 @@ set -eEuo pipefail
 umask 077
 
 PROJECT_NAME="Xray 管理器"
-SCRIPT_VERSION="0.10.4"
+SCRIPT_VERSION="1.0.0"
 REPO_OWNER="famintt"
 REPO_NAME="Xray-Manager"
 
