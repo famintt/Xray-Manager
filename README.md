@@ -61,9 +61,9 @@ name='HK' xm rep
 | `argo_transport` | Argo 传输：`ws` / `xhttp` / `grpc`，默认 `xhttp` |
 | `XM_XHTTP_MODE` | 可选，覆盖全部 XHTTP 模式；留空=`auto`（稳定）。也可填 `packet-up` / `stream-up` / `stream-one` 作为 fast 实验 |
 | `argo_cdn_host` / `argo_cdn_port` | 可选 Argo 优选边缘地址/端口；只替换链接的连接地址，SNI/Host 仍用隧道域名 |
-| `vl_sni` / `xr_sni` / `gr_sni` | 三种 Reality 的 SNI，默认 `www.bing.com` |
-| `ws_sni` / `xw_sni` / `gw_sni` | 三种 CDN 的 SNI，默认 `www.apple.com` |
-| `tu_sni` / `hy_sni` | TUIC / Hysteria2 的 SNI，默认 `www.apple.com` |
+| `vl_sni` / `xr_sni` / `gr_sni` | 三种 Reality 的 SNI，默认 `pypi.org` |
+| `ws_sni` / `xw_sni` / `gw_sni` | 三种 CDN 的 SNI，默认 `pypi.org` |
+| `tu_sni` / `hy_sni` | TUIC / Hysteria2 的 SNI，默认 `pypi.org` |
 | `cdn_host` / `cdn_port` | CDN 优选域名/地址和客户端连接端口 |
 | `ws_cert_mode` | `self`（默认自签，Cloudflare Full）或 `custom`（Origin CA，Full Strict） |
 | `name` / `uuid` / `passwd` | 节点名、UUID、密码（TUIC/HY2 使用密码） |
