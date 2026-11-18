@@ -116,9 +116,9 @@ _add_vless_reality() {
   print_ok "已添加节点：${name}"
 }
 
-add_vless_reality() { _add_vless_reality "vless-reality" 443 "VLESS-Vision-Reality" tcp; }
-add_vless_xhttp_reality() { _add_vless_reality "vless-xhttp-reality" 8443 "VLESS-XHTTP-Reality" xhttp; }
-add_vless_grpc_reality() { _add_vless_reality "vless-grpc-reality" 8444 "VLESS-gRPC-Reality" grpc; }
+add_vless_reality() { _add_vless_reality "vless-reality" 443 "Reality" tcp; }
+add_vless_xhttp_reality() { _add_vless_reality "vless-xhttp-reality" 8443 "XHTTP" xhttp; }
+add_vless_grpc_reality() { _add_vless_reality "vless-grpc-reality" 8444 "gRPC" grpc; }
 
 _add_vless_cdn() {
   local proto="$1" default_port="$2" default_name="$3" transport="$4"
@@ -163,15 +163,15 @@ _add_vless_cdn() {
   print_ok "已添加节点：${name}"
 }
 
-add_vless_ws_cdn() { _add_vless_cdn "vless-ws-cdn" 8443 "VLESS-WS-TLS-CDN" ws; }
-add_vless_xhttp_cdn() { _add_vless_cdn "vless-xhttp-cdn" 8444 "VLESS-XHTTP-TLS-CDN" xhttp; }
-add_vless_grpc_cdn() { _add_vless_cdn "vless-grpc-cdn" 8445 "VLESS-gRPC-TLS-CDN" grpc; }
+add_vless_ws_cdn() { _add_vless_cdn "vless-ws-cdn" 8443 "CDN" ws; }
+add_vless_xhttp_cdn() { _add_vless_cdn "vless-xhttp-cdn" 8444 "CDN" xhttp; }
+add_vless_grpc_cdn() { _add_vless_cdn "vless-grpc-cdn" 8445 "CDN" grpc; }
 
 add_vless_argo() {
   local tag port name uuid transport preferred_domain ws_path argo_mode argo_token endpoint_domain node_json secret_json
   ensure_singbox_ready
   port="$(prompt_port 8001)"
-  name="$(prompt_with_default "节点名称" "VLESS-XHTTP-Argo")"
+  name="$(prompt_with_default "节点名称" "Argo")"
   uuid="$(prompt_optional_value "UUID（留空自动生成）")"
   uuid="${uuid:-$(generate_uuid)}"
   transport="$(prompt_choice "传输 (ws/xhttp/grpc)" "xhttp")"
@@ -222,7 +222,7 @@ add_tuic() {
   ensure_tuic_core || fatal "官方 tuic-server 安装失败。"
   tag="$(generate_tag "tuic-v5")"
   port="$(prompt_port 11444)"
-  name="$(prompt_with_default "节点名称" "TUIC-v5")"
+  name="$(prompt_with_default "节点名称" "TUIC")"
   uuid="$(prompt_optional_value "UUID（留空自动生成）")"
   uuid="${uuid:-$(generate_uuid)}"
   password="$(prompt_optional_value "密码（留空自动生成）")"
@@ -254,7 +254,7 @@ add_hy2() {
   ensure_hysteria_core || fatal "官方 hysteria 安装失败。"
   tag="$(generate_tag "hy2")"
   port="$(prompt_port 11443)"
-  name="$(prompt_with_default "节点名称" "Hysteria2")"
+  name="$(prompt_with_default "节点名称" "HY2")"
   password="$(prompt_optional_value "密码（留空自动生成）")"
   password="${password:-$(generate_hex 8)}"
   tls_server="$(prompt_tls_sni)"

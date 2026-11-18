@@ -27,7 +27,7 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v1.1.2"
+check_eq "版本" "$(cat VERSION)" "v1.1.3"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -134,6 +134,12 @@ if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .preferred_domain == 
 else
   fail "auto_add_argo 优选地址丢失"
 fi
+
+# 节点显示名：机器名原样保留，协议名固定大小写。
+check_eq "命名：小写机器名+Reality" "$(ENV_NAME=hk-yt auto_node_name Reality)" "hk-yt-Reality"
+check_eq "命名：大小写机器名+XHTTP" "$(ENV_NAME=HK-YT auto_node_name XHTTP)" "HK-YT-XHTTP"
+check_eq "命名：TUIC" "$(ENV_NAME= auto_node_name TUIC)" "TUIC"
+check_eq "命名：XUDP" "$(ENV_NAME=MiXeD auto_node_name XUDP)" "MiXeD-XUDP"
 
 if [ "${FAIL}" -gt 0 ]; then
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
