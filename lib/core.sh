@@ -210,21 +210,32 @@ aux_listener_ready() {
   local pid_file="$1" binary="$2" port="$3" pid
   pid="$(read_pid_file "$pid_file")" || return 1
   pid_matches_binary_or_alive "$pid" "$binary" || return 1
-  ss -H -aunp 2>/dev/null | awk -v port="$port" -v process="pid=$pid," '
-    $2 == "UNCONN" && $5 ~ (":" port "$") && index($0, process) {found=1}
+  # ss -H -aunp 的列序是「State Recv-Q Send-Q Local Peer」，本地地址在第 4 列，
+  # 早期误写成第 2 列等于 UNCONN、第 5 列匹配端口，导致 sidecar 明明在监听
+  # 也被判成"未就绪"（实测 tuic-server/hysteria 日志都已 server started）。
+  # 这里不依赖固定列号：只要该行属于本进程，且任一字段以 ":PORT" 结尾即认为已绑。
+  ss -H -aunp 2>/dev/null | awk -v port=":${port}" -v process="pid=${pid}," '
+    index($0, process) {
+      for (i = 1; i <= NF; i++) {
+        if (length($i) >= length(port) && substr($i, length($i) - length(port) + 1) == port) {found=1; exit}
+      }
+    }
     END {exit !found}'
 }
 
 start_aux_one() {
-  local label="$1" binary="$2" config="$3" pid_file="$4" log_file="$5"
-  shift 5
+  local label="$1" binary="$2" config="$3" pid_file="$4" log_file="$5" fmt="$6"
+  shift 6
   local port pid n mem_limit low_port=0
   [ -f "$config" ] || return 0
   [ -x "$binary" ] || { print_err "${label} 二进制不存在：${binary}"; return 1; }
   port="$(aux_config_port "$config")" || return 1
   if aux_listener_ready "$pid_file" "$binary" "$port"; then return 0; fi
   kill_pid_file "$pid_file" "$binary" || return 1
-  prepare_data_plane_permissions || return 1
+  # 降权进程读不到 /usr/local/etc（部分系统 0700 root:root），因此把配置与证书
+  # 暂存到 /var/lib/xray-manager/data 下再启动。
+  local staged_config="${DATA_PLANE_DIR}/$(basename "$config")"
+  stage_data_plane_config "$config" "$staged_config" "$fmt" || { print_err "${label} 配置暂存失败：${config}"; return 1; }
   rotate_log_file "$log_file" || true
   if [ "$port" -lt 1024 ]; then low_port=1; fi
   mem_limit="$(go_mem_limit_value)" || return 1
@@ -233,7 +244,7 @@ start_aux_one() {
     close_inherited_lock_fd
     cd "${DATA_PLANE_DIR}" || exit 1
     [ -z "$mem_limit" ] || export GOMEMLIMIT="$mem_limit"
-    XM_BIND_LOW_PORT="$low_port" run_data_plane "$binary" "$@"
+    XM_BIND_LOW_PORT="$low_port" run_data_plane "$binary" "${@//__CONFIG__/$staged_config}"
   ) >>"$log_file" 2>&1 </dev/null &
   pid=$!
   if ! write_pid_file "$pid_file" "$pid"; then
@@ -256,12 +267,12 @@ start_aux_one() {
 }
 
 start_tuic_service() {
-  start_aux_one "TUIC" "${TUIC_BIN}" "${TUIC_CONFIG_FILE}" "${TUIC_PID_FILE}" "${LOG_DIR}/tuic.log" -c "${TUIC_CONFIG_FILE}"
+  start_aux_one "TUIC" "${TUIC_BIN}" "${TUIC_CONFIG_FILE}" "${TUIC_PID_FILE}" "${LOG_DIR}/tuic.log" json -c "__CONFIG__"
 }
 
 start_hysteria_service() {
-  start_aux_one "Hysteria2" "${HYSTERIA_BIN}" "${HYSTERIA_CONFIG_FILE}" "${HYSTERIA_PID_FILE}" "${LOG_DIR}/hysteria.log" \
-    server --disable-update-check -c "${HYSTERIA_CONFIG_FILE}"
+  start_aux_one "Hysteria2" "${HYSTERIA_BIN}" "${HYSTERIA_CONFIG_FILE}" "${HYSTERIA_PID_FILE}" "${LOG_DIR}/hysteria.log" yaml \
+    server --disable-update-check -c "__CONFIG__"
 }
 
 start_aux_services() {

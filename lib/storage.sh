@@ -127,6 +127,16 @@ lock_owned_by_self() {
   [ "${LOCK_OWNER_PID}" = "${BASHPID}" ]
 }
 
+# 子进程/子 shell 在 exec 目标二进制前必须关掉继承的锁 fd，否则该进程会一直
+# 持有 flock，后续 sbm/xm 命令全部拿不到锁（表现为"卡住/自锁"）。
+# 缺这个函数会让 sidecar 启动直接失败（core.sh 的启动子 shell 会调用它）。
+close_inherited_lock_fd() {
+  if [ -n "${LOCK_FD:-}" ]; then
+    eval "exec ${LOCK_FD}>&-" 2>/dev/null || true
+    LOCK_FD=""
+  fi
+}
+
 release_lock() {
   if [ "${LOCK_HELD}" != true ]; then
     return 0

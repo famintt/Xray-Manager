@@ -8,7 +8,7 @@ umask 077
 # Shared unprivileged data plane; control metadata stays root-only.
 DATA_PLANE_USER="${XM_DATA_PLANE_USER:-xray-manager}"
 DATA_PLANE_GROUP="${XM_DATA_PLANE_GROUP:-xray-manager}"
-DATA_PLANE_DIR="${DATA_PLANE_DIR:-${BASE_DIR}/data}"
+DATA_PLANE_DIR="${DATA_PLANE_DIR:-/var/lib/xray-manager/data}"
 
 ensure_data_plane_user() {
   [[ "${DATA_PLANE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1
@@ -61,33 +61,101 @@ data_plane_read_dir() {
 }
 
 prepare_data_plane_permissions() {
-  local file
-  data_plane_read_dir "${BASE_DIR}" || return 1
-  data_plane_read_dir "${CERT_DIR}" || return 1
-  for file in "${CONFIG_FILE}" "${TUIC_CONFIG_FILE}" "${HYSTERIA_CONFIG_FILE}"; do
-    [ ! -e "${file}" ] || data_plane_read_file "${file}" || return 1
-  done
-  while IFS= read -r -d '' file; do
-    data_plane_read_file "${file}" || return 1
-  done < <(find "${CERT_DIR}" -maxdepth 1 -type f \( -name '*.crt' -o -name '*.key' \) -print0)
+  # 先确保数据面用户/组存在：后续 chown 以该组为属组，组不存在时 chown 会直接
+  # 失败（Alpine 实测报 invalid group），sidecar 启动随之整体失败。
+  ensure_data_plane_user || { print_err "无法准备数据面用户 ${DATA_PLANE_USER}:${DATA_PLANE_GROUP}"; return 1; }
+  # 数据面目录刻意放在 /var/lib 而不是 BASE_DIR 下：不少系统的 /usr/local/etc
+  # 是 0700 root:root，降权进程连穿过去都不行（实测 sidecar 报 permission denied）。
+  # 这里只保证"暂存目录"归数据面用户所有，配置/证书用 stage 函数复制进来。
   data_plane_plain_path "${DATA_PLANE_DIR}" || return 1
-  mkdir -p "${DATA_PLANE_DIR}" || return 1
-  chown "${DATA_PLANE_USER}:${DATA_PLANE_GROUP}" "${DATA_PLANE_DIR}" && chmod 0700 "${DATA_PLANE_DIR}"
+  # 父目录默认是 mkdir 继承 umask 出来的 0700 root:root，降权进程连穿过都不行
+  # （实测 open .../hysteria.yaml: permission denied）。父目录给属组遍历权即可，
+  # 真正的数据目录仍然 0700 且归数据面用户。
+  local data_plane_root
+  data_plane_root="$(dirname "${DATA_PLANE_DIR}")"
+  mkdir -p "${data_plane_root}" || return 1
+  chown "root:${DATA_PLANE_GROUP}" "${data_plane_root}" || return 1
+  chmod 0750 "${data_plane_root}" || return 1
+  mkdir -p "${DATA_PLANE_DIR}/certs" || return 1
+  chown "${DATA_PLANE_USER}:${DATA_PLANE_GROUP}" "${DATA_PLANE_DIR}" "${DATA_PLANE_DIR}/certs" || return 1
+  chmod 0700 "${DATA_PLANE_DIR}" || return 1
+  chmod 0700 "${DATA_PLANE_DIR}/certs" || return 1
+}
+
+# 把 root 侧配置与它引用的证书复制到数据面目录，并改写配置里的路径。
+# 只复制本实例自己生成的文件（路径必须在 BASE_DIR 下），避免任意读。
+stage_data_plane_config() {
+  local src="$1" dst="$2" format="$3"
+  local cert key stage_cert stage_key
+  data_plane_plain_path "${src}" || return 1
+  [ -f "${src}" ] || return 1
+  prepare_data_plane_permissions || return 1
+  # Hysteria 的 .yaml 实际由 jq 生成（JSON 是合法 YAML），所以两种格式都用
+  # jq 取路径；早前用 awk 匹配 `cert:` 行在 JSON 输出上取不到值。
+  case "${format}" in
+  json)
+    cert="$(jq -r '.certificate // ""' "${src}")" || return 1
+    key="$(jq -r '.private_key // ""' "${src}")" || return 1
+    ;;
+  yaml)
+    cert="$(jq -r '.tls.cert // ""' "${src}")" || return 1
+    key="$(jq -r '.tls.key // ""' "${src}")" || return 1
+    ;;
+  *) print_err "未知配置格式：${format}"; return 1 ;;
+  esac
+  for pair in "cert:${cert}" "key:${key}"; do
+    local kind="${pair%%:*}" path="${pair#*:}"
+    [ -n "${path}" ] || { print_err "配置缺少 ${kind} 路径：${src}"; return 1; }
+    case "${path}" in "${CERT_DIR}"/*) ;; *) print_err "拒绝暂存外部路径：${path}"; return 1 ;; esac
+    [ -f "${path}" ] || { print_err "证书文件不存在：${path}"; return 1; }
+  done
+  stage_cert="${DATA_PLANE_DIR}/certs/$(basename "${cert}")"
+  stage_key="${DATA_PLANE_DIR}/certs/$(basename "${key}")"
+  install -m 0600 -o "${DATA_PLANE_USER}" -g "${DATA_PLANE_GROUP}" "${cert}" "${stage_cert}" || return 1
+  install -m 0600 -o "${DATA_PLANE_USER}" -g "${DATA_PLANE_GROUP}" "${key}" "${stage_key}" || return 1
+  case "${format}" in
+  json)
+    jq --arg c "${stage_cert}" --arg k "${stage_key}" '.certificate=$c | .private_key=$k' "${src}" >"${dst}.tmp" || return 1
+    ;;
+  yaml)
+    jq --arg c "${stage_cert}" --arg k "${stage_key}" '.tls.cert=$c | .tls.key=$k' "${src}" >"${dst}.tmp" || return 1
+    ;;
+  esac
+  mv -f "${dst}.tmp" "${dst}" || return 1
+  chown "${DATA_PLANE_USER}:${DATA_PLANE_GROUP}" "${dst}" && chmod 0600 "${dst}"
+}
+
+# util-linux 的 setpriv 才有 --reuid；BusyBox 版 setpriv 只有 --nnp/--inh-caps，
+# 在 Alpine 上直接传 --reuid 会报 "unrecognized option"（实测 uk-oracle-nat）。
+data_plane_setpriv_supported() {
+  command_exists setpriv || return 1
+  setpriv --reuid=0 --regid=0 --clear-groups true >/dev/null 2>&1
 }
 
 # Call in a child/subshell: exec preserves the PID stored by its root parent.
 run_data_plane() {
   ensure_data_plane_user || return 1
   if declare -F close_inherited_lock_fd >/dev/null; then close_inherited_lock_fd; fi
-  if command_exists setpriv; then
+  if data_plane_setpriv_supported; then
     exec setpriv --reuid="${DATA_PLANE_UID}" --regid="${DATA_PLANE_GID}" --clear-groups \
       --bounding-set=-all,+net_bind_service --inh-caps=-all,+net_bind_service \
       --ambient-caps=-all,+net_bind_service --no-new-privs -- "$@"
   fi
-  if command_exists runuser && ! jq -e 'any(.[]; (.port | tonumber) < 1024)' "${NODES_FILE}" >/dev/null 2>&1; then
-    exec runuser -u "${DATA_PLANE_USER}" -- "$@"
+  if [ "${XM_BIND_LOW_PORT:-0}" != "1" ]; then
+    # 没有 util-linux setpriv 时用 su 降权（BusyBox su 支持 -s/-c，实测可用）。
+    local quoted
+    quoted="$(printf '%q ' "$@")"
+    if command_exists su; then
+      exec su -s /bin/sh -c "exec ${quoted}" "${DATA_PLANE_USER}"
+    fi
+    if command_exists runuser; then
+      exec runuser -u "${DATA_PLANE_USER}" -- "$@"
+    fi
+  else
+    print_warn "本机 setpriv 不支持 --reuid，无法为低端口保留 NET_BIND_SERVICE，改由 root 绑定低端口。"
+    exec "$@"
   fi
-  print_err "低权限启动需要 setpriv（低端口需要 ambient NET_BIND_SERVICE）。"
+  print_err "缺少可用的降权工具（setpriv/su/runuser），无法以 ${DATA_PLANE_USER} 运行数据面。"
   return 1
 }
 

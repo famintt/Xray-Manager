@@ -39,7 +39,9 @@ FAIL=0
 pass() { PASS=$((PASS+1)); printf 'ok   %s\n' "$*"; }
 fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
-check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
+# 用 [[ == ]] 而不是 `printf | grep -q`：set -o pipefail 下 grep -q 命中即退出，
+# printf 收到 SIGPIPE 会让整条管道返回 141，断言随机变红（本文件历史上多次偶发）。
+check_contains() { if [[ "$2" == *"$3"* ]]; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
 check_eq "版本" "$(cat VERSION)" "v1.2.0"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
@@ -165,6 +167,34 @@ if grep -q '/tmp/xm-' lib/render.sh; then
   fail "render.sh 仍有 /tmp 调试产物"
 else
   pass "调试产物不落 /tmp"
+fi
+
+if awk '/^prepare_data_plane_permissions\(\)/,/^}/' lib/service.sh | grep -q 'ensure_data_plane_user'; then
+  pass "数据面权限前先建用户"
+else
+  fail "prepare_data_plane_permissions 未先 ensure_data_plane_user"
+fi
+# XR-04：数据面配置必须暂存到独立目录（/usr/local/etc 可能 0700 不可穿过）
+if grep -q '^DATA_PLANE_DIR="${DATA_PLANE_DIR:-/var/lib/xray-manager/data}"' lib/service.sh \
+   && grep -q 'stage_data_plane_config' lib/core.sh; then
+  pass "数据面配置暂存"
+else
+  fail "数据面配置未走暂存路径"
+fi
+
+# XR-04：BusyBox setpriv 没有 --reuid，必须存在可移植降权回退
+if grep -q 'data_plane_setpriv_supported' lib/service.sh \
+   && grep -q 'exec su -s /bin/sh -c' lib/service.sh; then
+  pass "BusyBox setpriv 降权回退"
+else
+  fail "缺少 BusyBox setpriv 降权回退"
+fi
+
+# XR-14：Xray 只发 .zip，必须有 unzip 之外的解压回退（EOL 系统装不上 unzip）
+if grep -q 'python3 -m zipfile -e' lib/install.sh; then
+  pass "zip 解压回退"
+else
+  fail "缺少 zip 解压回退"
 fi
 
 # XR-16：发布摘要门禁文件存在

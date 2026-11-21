@@ -43,7 +43,9 @@ pkg_install() {
 }
 
 required_commands() {
-  printf '%s\n' curl tar unzip jq openssl awk sed grep find head mktemp install nohup tr hostname kill rm mv chmod cat cp
+  # unzip 不是硬性依赖：官方发布包是 .tar.gz，只有上游改用 .zip 时才需要，
+  # 在解包处按需检查（Debian 11 等 EOL 系统装不上 unzip，实测会卡住安装）。
+  printf '%s\n' curl tar jq openssl awk sed grep find head mktemp install nohup tr hostname kill rm mv chmod cat cp
   if systemd_available; then
     printf '%s\n' systemctl
   elif openrc_available; then
@@ -76,7 +78,9 @@ ensure_dependencies() {
       packages=(ca-certificates curl tar unzip jq openssl procps iproute2 util-linux findutils grep sed gawk coreutils)
     fi
 
-    pkg_install "${packages[@]}"
+    # 包管理器失败不应直接终止：Debian 11（EOL）等系统的索引已失效，实测
+    # apt-get 会 404；真正缺什么由下面的 verify_runtime_prereqs 精确报告。
+    pkg_install "${packages[@]}" || print_warn "依赖安装未完全成功，继续并检查运行期必需命令。"
   fi
   verify_runtime_prereqs
 }
@@ -212,6 +216,21 @@ install_release_bundle() {
   rm -rf "${tmpdir}"
 }
 
+extract_zip() {
+  # 上游 Xray 只发 .zip。Debian 11 这类 EOL 系统装不上 unzip（apt 源 404），
+  # 因此按 unzip → python3 zipfile → bsdtar 依次回退。
+  local src="$1" dest="$2"
+  if command_exists unzip; then
+    unzip -q "${src}" -d "${dest}"
+  elif command_exists python3; then
+    python3 -m zipfile -e "${src}" "${dest}"
+  elif command_exists bsdtar; then
+    bsdtar -xf "${src}" -C "${dest}"
+  else
+    return 1
+  fi
+}
+
 install_xray_core() {
   local arch asset tmpdir archive binary expected
   local -a urls
@@ -234,7 +253,7 @@ install_xray_core() {
     fatal "下载 xray 失败（已尝试 ${#urls[@]} 个源）。"
   fi
   verify_sha256 "${archive}" "${expected}"
-  unzip -q "${archive}" -d "${tmpdir}"
+  extract_zip "${archive}" "${tmpdir}" || fatal "解压 xray 发行包失败（缺少 unzip/python3/bsdtar）。"
   binary="$(find "${tmpdir}" -type f -name xray | head -n 1)"
   [ -n "${binary}" ] || fatal "安装包中未找到 xray 可执行文件。"
   # A08：整版本原子替换——直接 install 覆盖会在中断时留下半个二进制
@@ -459,6 +478,8 @@ uninstall_project() {
   # XR-14：只清本实例资源。原先还会 pkill -x darkhttpd（会杀掉同机其他实例的
   # 订阅服务），漏删 sidecar 与网络调优文件（重装后残留旧二进制/旧 sysctl）。
   rm -rf "${BASE_DIR}" "${LIB_DIR}" "${INSTALL_BIN}" "${XRAY_BIN}"
+  # 数据面暂存目录（配置/证书副本）与二进制一起清掉，避免残留凭据
+  rm -rf "${DATA_PLANE_DIR:-/var/lib/xray-manager/data}"
   rm -f "${TUIC_BIN}" "${HYSTERIA_BIN}" "${NET_TUNE_SYSCTL_FILE}" 2>/dev/null || true
   rm -f "${MTP_BIN:-/usr/local/bin/mtp}" 2>/dev/null || true
   print_info "保留 cloudflared（可能被其他项目共用）。"

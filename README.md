@@ -209,6 +209,22 @@ tests/smoke.sh                冒烟测试
 - 订阅矩阵的角色权限拆分（读 / 按机写 / 管理）属于 sub-worker 仓库，本次未改。
 - 多 TUIC/HY2 节点仍是"一协议一节点"策略；需要多实例要等后续版本。
 
+### v1.2.0 机队实测补充修复
+
+上机队后暴露的四个真实缺陷（均已修复并有 smoke 断言）：
+
+1. **数据面目录父级权限**：`/var/lib/xray-manager` 由 `mkdir` 继承 umask 生成 `0700 root:root`，
+   降权进程连目录都穿不过去，sidecar 报 `open .../hysteria.yaml: permission denied`。
+   现在父目录固定 `0750 root:<数据面组>`，真正的数据目录仍是 `0700 <数据面用户>`。
+2. **BusyBox setpriv 无 `--reuid`**：Alpine/BusyBox 的 `setpriv` 只有 `--nnp/--inh-caps`，
+   直接传 `--reuid` 会 `unrecognized option`。现在先探测 util-linux 能力，否则回退
+   `su -s /bin/sh -c 'exec ...' <用户>`，低端口场景才退回 root 并告警。
+3. **zip 解压依赖**：上游 Xray 只发 `.zip`，而 Debian 11 等 EOL 系统 `apt-get` 已 404，
+   装不上 `unzip`。现在按 `unzip → python3 -m zipfile → bsdtar` 依次回退，且 `unzip`
+   不再列入硬性依赖。
+4. **依赖安装失败即中止**：`pkg_install` 失败不再直接 fatal，改由运行期自检精确报告缺什么。
+
+
 ## 说明
 
 - 本项目是独立项目，不修改 sbm/mm；生产使用前请先在测试机验证客户端实际连通。
