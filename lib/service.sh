@@ -5,6 +5,116 @@ set -eEuo pipefail
 
 umask 077
 
+# Shared unprivileged data plane; control metadata stays root-only.
+DATA_PLANE_USER="${XM_DATA_PLANE_USER:-xray-manager}"
+DATA_PLANE_GROUP="${XM_DATA_PLANE_GROUP:-xray-manager}"
+DATA_PLANE_DIR="${DATA_PLANE_DIR:-${BASE_DIR}/data}"
+
+ensure_data_plane_user() {
+  [[ "${DATA_PLANE_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1
+  [[ "${DATA_PLANE_GROUP}" =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1
+  if ! getent group "${DATA_PLANE_GROUP}" >/dev/null 2>&1; then
+    if command_exists groupadd; then groupadd --system "${DATA_PLANE_GROUP}" || return 1
+    elif command_exists addgroup; then addgroup -S "${DATA_PLANE_GROUP}" || return 1
+    else print_err "缺少系统用户组管理工具。"; return 1; fi
+  fi
+  if ! id -u "${DATA_PLANE_USER}" >/dev/null 2>&1; then
+    if command_exists useradd; then
+      useradd --system --gid "${DATA_PLANE_GROUP}" --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "${DATA_PLANE_USER}" || return 1
+    elif command_exists adduser; then
+      adduser -S -D -H -h /nonexistent -s /sbin/nologin -G "${DATA_PLANE_GROUP}" "${DATA_PLANE_USER}" || return 1
+    else print_err "缺少系统用户管理工具。"; return 1; fi
+  fi
+  DATA_PLANE_UID="$(id -u "${DATA_PLANE_USER}")" || return 1
+  DATA_PLANE_GID="$(getent group "${DATA_PLANE_GROUP}" | cut -d: -f3)" || return 1
+  [[ "${DATA_PLANE_UID}" =~ ^[1-9][0-9]*$ ]] && [[ "${DATA_PLANE_GID}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "$(id -g "${DATA_PLANE_USER}")" = "${DATA_PLANE_GID}" ] || {
+    print_err "数据面用户已有不同主组，拒绝复用。"; return 1;
+  }
+}
+
+# Only managed configuration/data paths use this helper. Release current is
+# intentionally outside this tree and must not be chmod/chowned here.
+data_plane_plain_path() {
+  local path="$1" part="/" item
+  [[ "${path}" = /* ]] || return 1
+  local -a pieces=()
+  IFS=/ read -r -a pieces <<<"${path#/}"
+  for item in "${pieces[@]}"; do
+    case "${item}" in ''|.|..) return 1 ;; esac
+    part="${part%/}/${item}"
+    [ ! -L "${part}" ] || { print_err "拒绝符号链接路径：${part}"; return 1; }
+  done
+}
+
+data_plane_read_file() {
+  local path="$1"
+  data_plane_plain_path "${path}" || return 1
+  [ -f "${path}" ] && [ "$(stat -c %h "${path}")" = 1 ] || return 1
+  chown "0:${DATA_PLANE_GROUP}" "${path}" && chmod 0640 "${path}"
+}
+
+data_plane_read_dir() {
+  local path="$1"
+  data_plane_plain_path "${path}" && [ -d "${path}" ] || return 1
+  chown "0:${DATA_PLANE_GROUP}" "${path}" && chmod 0750 "${path}"
+}
+
+prepare_data_plane_permissions() {
+  local file
+  data_plane_read_dir "${BASE_DIR}" || return 1
+  data_plane_read_dir "${CERT_DIR}" || return 1
+  for file in "${CONFIG_FILE}" "${TUIC_CONFIG_FILE}" "${HYSTERIA_CONFIG_FILE}"; do
+    [ ! -e "${file}" ] || data_plane_read_file "${file}" || return 1
+  done
+  while IFS= read -r -d '' file; do
+    data_plane_read_file "${file}" || return 1
+  done < <(find "${CERT_DIR}" -maxdepth 1 -type f \( -name '*.crt' -o -name '*.key' \) -print0)
+  data_plane_plain_path "${DATA_PLANE_DIR}" || return 1
+  mkdir -p "${DATA_PLANE_DIR}" || return 1
+  chown "${DATA_PLANE_USER}:${DATA_PLANE_GROUP}" "${DATA_PLANE_DIR}" && chmod 0700 "${DATA_PLANE_DIR}"
+}
+
+# Call in a child/subshell: exec preserves the PID stored by its root parent.
+run_data_plane() {
+  ensure_data_plane_user || return 1
+  if declare -F close_inherited_lock_fd >/dev/null; then close_inherited_lock_fd; fi
+  if command_exists setpriv; then
+    exec setpriv --reuid="${DATA_PLANE_UID}" --regid="${DATA_PLANE_GID}" --clear-groups \
+      --bounding-set=-all,+net_bind_service --inh-caps=-all,+net_bind_service \
+      --ambient-caps=-all,+net_bind_service --no-new-privs -- "$@"
+  fi
+  if command_exists runuser && ! jq -e 'any(.[]; (.port | tonumber) < 1024)' "${NODES_FILE}" >/dev/null 2>&1; then
+    exec runuser -u "${DATA_PLANE_USER}" -- "$@"
+  fi
+  print_err "低权限启动需要 setpriv（低端口需要 ambient NET_BIND_SERVICE）。"
+  return 1
+}
+
+# Combined ss output has netid/state columns: local address is column 5.
+data_plane_listener_ready() {
+  local pid="$1" transport="$2" port="$3" snapshot
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && [ "${pid}" -gt 1 ] || return 1
+  [[ "${port}" =~ ^[0-9]+$ ]] && [ "${port}" -gt 0 ] && [ "${port}" -le 65535 ] || return 1
+  case "${transport}" in tcp|udp) ;; *) return 1 ;; esac
+  command_exists ss || { print_err "就绪验证需要 ss。"; return 1; }
+  snapshot="$(ss -H -lnptu 2>/dev/null)" || return 1
+  awk -v p="${pid}" -v t="${transport}" -v n="${port}" '
+    $1 == t && $5 ~ (":" n "$") && index($0, "pid=" p ",") {found=1}
+    END {exit !found}' <<<"${snapshot}"
+}
+
+await_data_plane_listener() {
+  local pid="$1" transport="$2" port="$3" tries="${4:-${XM_READINESS_RETRIES:-3}}" attempt
+  [[ "${tries}" =~ ^[1-9][0-9]*$ ]] || tries=3
+  for ((attempt=1; attempt<=tries; attempt++)); do
+    kill -0 "${pid}" 2>/dev/null || return 1
+    data_plane_listener_ready "${pid}" "${transport}" "${port}" && return 0
+    [ "${attempt}" -eq "${tries}" ] || sleep 1
+  done
+  return 1
+}
+
 read_restart_count() {
   local tag="$1"
   local file="${RUNTIME_DIR}/${tag}.restart_count"
@@ -213,14 +323,19 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@chown
 SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+# SEC-03：只需要绑定特权端口；CAP_NET_RAW 对代理进程非必需，收窄以降低被利用面。
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 OOMPolicy=kill
 OOMScoreAdjust=-100
 RestartSteps=10
 RestartSec=3
 MemorySwapMax=0
-ReadWritePaths=${BASE_DIR} ${LIB_DIR}
+# SEC-03：ProtectSystem=strict 下只有显式列出的路径可写。旧值 ReadWritePaths=${BASE_DIR}
+# 让节点/密钥/证书整个数据目录都可写；运行期其实只需要日志与 runtime。
+# ReadOnlyPaths 显式声明配置与证书仍需可读（strict 已只读，这里固定语义，避免以后放宽）。
+ReadOnlyPaths=${CONFIG_FILE} ${CERT_DIR}
+ReadWritePaths=${LOG_DIR} ${RUNTIME_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -353,64 +468,6 @@ service_state() {
   fi
 }
 
-socks5_whitelist_cleanup() {
-  local chain="XM_SOCKS5_WL" ipt nums n
-  command_exists iptables || return 0
-  for ipt in iptables ip6tables; do
-    command_exists "${ipt}" || continue
-    # 按行号删除 INPUT 中跳转到本链的规则；规则包含 --dport 等参数时
-    # 不能用 "-D INPUT -j chain" 精确匹配，否则旧规则会残留。
-    nums="$("${ipt}" -L INPUT --line-numbers -n 2>/dev/null | awk -v c="${chain}" '$2 == c {print $1}' | sort -rn)"
-    for n in ${nums}; do
-      "${ipt}" -D INPUT "${n}" >/dev/null 2>&1 || true
-    done
-    "${ipt}" -F "${chain}" >/dev/null 2>&1 || true
-    "${ipt}" -X "${chain}" >/dev/null 2>&1 || true
-  done
-}
-
-# 仅用 iptables 做源地址白名单；没有 iptables 的环境只告警，不影响节点本身。
-socks5_whitelist_apply() {
-  local enabled ips ip port tag proto chain="XM_SOCKS5_WL" ipt
-  enabled="$(manager_env_or_setting "socks5_wl_flag" "")"
-  case "${enabled,,}" in
-  true | 1 | yes | on) ;;
-  *) socks5_whitelist_cleanup; return 0 ;;
-  esac
-  if ! command_exists iptables; then
-    print_warn "socks5 白名单需要 iptables，当前系统不可用，未应用。"
-    return 0
-  fi
-  ips="$(manager_env_or_setting "socks5_ips" "")"
-  if [ -z "${ips}" ]; then
-    print_warn "socks5_wl_flag 已开启但 socks5_ips 为空，未应用白名单。"
-    socks5_whitelist_cleanup
-    return 0
-  fi
-  socks5_whitelist_cleanup
-  for ipt in iptables ip6tables; do
-    command_exists "${ipt}" || continue
-    "${ipt}" -N "${chain}" >/dev/null 2>&1 || true
-    "${ipt}" -F "${chain}" >/dev/null 2>&1 || true
-    for ip in ${ips//,/ }; do
-      [ -n "${ip}" ] || continue
-      "${ipt}" -A "${chain}" -s "${ip}" -j ACCEPT >/dev/null 2>&1 || true
-    done
-    "${ipt}" -A "${chain}" -j DROP >/dev/null 2>&1 || true
-  done
-  while IFS= read -r tag; do
-    [ -n "${tag}" ] || continue
-    proto="$(node_value "${tag}" "protocol")"
-    [ "${proto}" = "socks5" ] || continue
-    port="$(node_value "${tag}" "port")"
-    [[ "${port}" =~ ^[0-9]+$ ]] || continue
-    for ipt in iptables ip6tables; do
-      command_exists "${ipt}" || continue
-      "${ipt}" -I INPUT -p tcp --dport "${port}" -m comment --comment "xm_socks5_wl" -j "${chain}" >/dev/null 2>&1 || true
-    done
-  done < <(iter_node_tags)
-}
-
 stop_service() {
   local log_file="${BASE_DIR}/logs/xray.log" reason_file="${BASE_DIR}/logs/stop_reason.log"
   stop_aux_services || true
@@ -418,7 +475,6 @@ stop_service() {
     tail -n 50 "${log_file}" >"${reason_file}" 2>/dev/null || true
     chmod 600 "${reason_file}" 2>/dev/null || true
   fi
-  socks5_whitelist_cleanup || true
   if systemd_available; then
     systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
   elif openrc_available; then
@@ -475,8 +531,10 @@ reload_service() {
   fi
   stop_service
   start_service
+  # A07/XR-06：就绪自检失败说明新配置的端口没起来（被占用/绑定失败），
+  # 旧实现吞掉结果继续返回 0，调用方会当成部署成功并上报订阅。
   if [ "${XM_TEST_MODE:-0}" != "1" ]; then
-    verify_data_plane_ready || true
+    verify_data_plane_ready || return 1
   fi
   return 0
 }
@@ -568,7 +626,6 @@ start_service() {
     write_pid_file "${PID_FILE}" "$!"
   fi
 
-  socks5_whitelist_apply || true
   start_aux_services || { print_err "官方 sidecar 核心启动失败。"; return 1; }
   print_ok "服务状态：$(service_state)"
 }

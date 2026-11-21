@@ -36,6 +36,15 @@ warn_if_bindv6only() {
   fi
 }
 
+# 节点 UUID 校验：Xray 的 VLESS/TUIC 用户 ID 必须是标准 36 位 UUID，
+# 否则配置能渲染但客户端/服务端会拒绝握手。旧 core.sh 引用了一个从未定义的
+# valid_node_uuid（半成品重构残留），这里补齐并保留两个名字。
+is_valid_uuid() {
+  [[ "${1:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+valid_node_uuid() { is_valid_uuid "${1:-}"; }
+
 is_ip_address() {
   local ip="$1" octet
   # IPv4：四组 0-255（兼容前导零）

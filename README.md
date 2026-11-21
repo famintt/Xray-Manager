@@ -180,6 +180,35 @@ tests/smoke.sh                冒烟测试
 - JP1/JP2/FRA 的 Vision/XHTTP 公网 TCP 也无 TLS 响应，说明不仅是 UDP 问题，而是对应 TCP 端口未真正转发；Argo 仍可用是因为它走 Cloudflare 出站，不依赖入站映射。
 - 128MB/1vCPU 主机实测可稳定运行 5 节点（Xray + TUIC + HY2 + cloudflared），内存约 40–67MB；仍建议逐台部署并观察 `free -m`。
 
+## v1.2.0 整改清单（安全 / 可靠性）
+
+本节对应 `XM` 审计文档（基线 v1.1.3）的整改项，均为服务端代码级修复，不改变已有节点配置与链接格式。
+
+安全：
+
+- **XR-01 订阅目录隔离**：对外发布的只有 `sub/public/`（`index.html` 与 `<token>.txt`）；`token`、`links.txt`、`url`、上报临时文件留在私有目录。升级后旧目录里的 `<token>.txt` 会被清理，HTTP 服务只挂 `public`。
+- **XR-03 订阅令牌分权**：`sub_report_token`（写，仅上报用）与 `sub_read_token`（读，拼进订阅 URL）可分开配置；只配旧 `sub_token` 时两者共用并给出提示。订阅 URL 使用读令牌，上报使用写令牌。
+- **XR-04 / XR-09 Argo 入站不监听公网**：`vless-*-argo` 入站只绑 `127.0.0.1`，外部只能经 cloudflared 进入；UUID 认证保持不变。**升级后需 `xm rep` 或重新生成配置才会生效。**
+- **XR-05 MTProto 参数校验**：`mtp_secret` 必须 32 位十六进制、`mtp_domain` 走 RFC1123 校验；启动不再经 `sh -c`，改为数组直启并写真实 PID；域名不再用 `%b` 解释，避免被当转义序列。
+- **XR-16 交付摘要门禁**：构建时生成 `install.sh.sha256`，`scripts/check-version.sh` 校验其与 `install.sh` 一致，防止"仓库安装器与发布包不匹配"。
+
+可靠性：
+
+- **XR-06 锁归属与就绪传播**：锁记录 `BASHPID`，子 shell 的 `ERR` 不再释放父进程的锁、也不会误触发回滚；回滚使用精确快照目录而非"最新备份"；数据面就绪失败会向上传播（不再 `|| true` 吞掉）。
+- **XR-07 单实例 sidecar**：同一协议只允许一个 TUIC / Hysteria2 节点，第二个在写节点前即被拒绝，避免两个 sidecar 抢同一端口。
+- **XR-08 CLI 参数**：`hy_up` / `hy_down` 校验为 0-9 位非负整数，`cdn_port` 越界回退 443，端口类参数统一 1-65535。
+- **XR-10 sidecar 配置生成**：TUIC / Hysteria2 配置改为临时目录生成再原子替换；生成前校验端口、密码、证书与私钥是否配对（证书/私钥错配会"进程起得来但握手必失败"）。
+- **XR-12 watchdog**：加载 `metadata/upstream.env`；重启命令改为固定分支（`systemd` / `openrc` / `standalone`），去掉 `eval`；`cache.db` 只在 Xray 未运行时清理。
+- **XR-13 对账保护**：`config.json` 损坏或缺表时不再当作"节点不存在"而删除记录，改为告警跳过。
+- **XR-14 版本切换与卸载**：释放包按整体回滚安装（任一文件失败则回滚已替换文件）；`latest_tag` 加 `vX.Y.Z` 校验；卸载先释放锁再删目录，只清本实例资源（不再 `pkill darkhttpd`）。
+- **XR-15 调试产物**：配置校验失败的文件写到 `logs/`（0600），不再落 `/tmp`。
+- **XR-17 / XR-18**：`sub_mode` 未显式传入时不覆写既有 worker 配置；Argo 优选地址为空时回退隧道域名；测试不再依赖固定 `/mnt/d` 路径。
+
+未覆盖（已知）：
+
+- 订阅矩阵的角色权限拆分（读 / 按机写 / 管理）属于 sub-worker 仓库，本次未改。
+- 多 TUIC/HY2 节点仍是"一协议一节点"策略；需要多实例要等后续版本。
+
 ## 说明
 
 - 本项目是独立项目，不修改 sbm/mm；生产使用前请先在测试机验证客户端实际连通。

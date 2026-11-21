@@ -29,6 +29,16 @@ else
   exit 1
 fi
 
+# XR-12：upstream.env 提供 sidecar 资产表/镜像地址；缺它时 watchdog 里
+# ensure_aux_services 一旦真的要装核心就会读到未定义数组。
+if [ -n "${SOURCE_ROOT}" ] && [ -f "${SOURCE_ROOT}/metadata/upstream.env" ]; then
+  # shellcheck source=metadata/upstream.env
+  . "${SOURCE_ROOT}/metadata/upstream.env"
+elif [ -f "${LIB_DIR}/upstream.env" ]; then
+  # shellcheck source=/usr/local/lib/xray-manager/upstream.env
+  . "${LIB_DIR}/upstream.env"
+fi
+
 if ! xm_load_all; then
   exit 1
 fi
@@ -73,16 +83,30 @@ ensure_log_rotation() {
     [ -n "${lf}" ] || continue
     rotate_log_file "${lf}" || true
   done < <(find "${LOG_DIR}" -type f -name '*.cloudflared.log' 2>/dev/null)
-  # 1.1：cache.db 连接缓存超阈值直接清空（开心保活防膨胀；重建代价低）
+  # 1.1：cache.db 连接缓存超阈值清空。XR-12：只能在 xray 未运行时删——
+  # 运行中的实例持有该文件，删除会让它继续写已 unlink 的 inode，重启后缓存空档。
   local cache_file cache_size
   cache_file="${RUNTIME_DIR}/cache.db"
-  if [ -f "${cache_file}" ]; then
+  if [ -f "${cache_file}" ] && ! xray_process_running; then
     cache_size="$(wc -c <"${cache_file}" 2>/dev/null | tr -d '[:space:]')"
     if [ -n "${cache_size}" ] && [ "${cache_size}" -gt $((LOG_ROTATE_SIZE_MB * 1024 * 1024)) ]; then
       rm -f "${cache_file}"
       print_warn "cache.db 超过 ${LOG_ROTATE_SIZE_MB}MB，已清空重建。"
     fi
   fi
+}
+
+# XR-12：判断 xray 是否在跑（systemd/openrc/standalone 三种部署统一语义），
+# 供 cache.db 清理与 sidecar 决策使用。
+xray_process_running() {
+  if systemd_available; then
+    systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null && return 0
+  elif openrc_available; then
+    rc-service "${SERVICE_NAME}" status >/dev/null 2>&1 && return 0
+  fi
+  local pid
+  pid="$(read_pid_file "${PID_FILE}" 2>/dev/null || true)"
+  [ -n "${pid}" ] && pid_matches_binary_or_alive "${pid}" "${XRAY_BIN}"
 }
 
 # 5.2：数据面健康判定——TCP 任一可探活即健康；全 UDP / 混合部署在进程存活前提下
@@ -108,7 +132,9 @@ singbox_healthy() {
 # 允许达 N 次连续失败后才强制重启（失败计数在下一轮探活成功时清零）。
 # 三态语义见 singbox_probe_status：0=健康、1=假死候选、2=不适用。
 probe_fail_escalate() {
-  local restart_cmd="$1"
+  # XR-12：入参是部署形态（systemd/openrc/standalone），不是待 eval 的命令串。
+  # 旧实现把命令拼成字符串再 eval，节点 tag/域名一旦含特殊字符就会执行注入内容。
+  local mode="$1"
   local probe_fail_file="${RUNTIME_DIR}/probe_fail_count"
   local probe_fail probe_fail_limit
   probe_fail_limit="${XM_PROBE_FAIL_LIMIT:-3}"
@@ -127,7 +153,15 @@ probe_fail_escalate() {
   print_warn "xray 连续 ${probe_fail} 次数据面探活失败，判定假死，强制重启。"
   # 1.2：重启前 dump 当前活动连接快照到运行时日志，辅助根因定位
   clash_api_dump_connections || true
-  eval "${restart_cmd}"
+  case "${mode}" in
+  systemd) systemctl restart "${SERVICE_NAME}" >/dev/null 2>&1 || true ;;
+  openrc) rc-service "${SERVICE_NAME}" restart >/dev/null 2>&1 || rc-service "${SERVICE_NAME}" start >/dev/null 2>&1 || true ;;
+  standalone)
+    kill_pid_file "${PID_FILE}" "${XRAY_BIN}"
+    start_non_systemd_singbox
+    ;;
+  *) print_warn "未知重启形态 ${mode}，跳过重启。" ;;
+  esac
 }
 
 ensure_singbox() {
@@ -146,7 +180,7 @@ ensure_singbox() {
       rm -f "${RUNTIME_DIR}/probe_fail_count"
       return 0
     fi
-    probe_fail_escalate "systemctl restart ${SERVICE_NAME} >/dev/null 2>&1 || true"
+    probe_fail_escalate "systemd"
     return 0
   fi
 
@@ -156,7 +190,7 @@ ensure_singbox() {
         rm -f "${RUNTIME_DIR}/probe_fail_count"
         return 0
       fi
-      probe_fail_escalate "rc-service ${SERVICE_NAME} restart >/dev/null 2>&1 || rc-service ${SERVICE_NAME} start >/dev/null 2>&1 || true"
+      probe_fail_escalate "openrc"
       return 0
     fi
     kill_pid_file "${PID_FILE}" "${XRAY_BIN}"
@@ -173,7 +207,7 @@ ensure_singbox() {
       rm -f "${RUNTIME_DIR}/probe_fail_count"
       return 0
     fi
-    probe_fail_escalate "rm -f \"${PID_FILE}\"; start_non_systemd_singbox"
+    probe_fail_escalate "standalone"
     return 0
   fi
 
@@ -183,7 +217,7 @@ ensure_singbox() {
 
 start_temp_tunnel() {
   local tag="$1"
-  local local_port pid_file log_file domain edge_ip tmp_pid
+  local local_port pid_file log_file domain tmp_pid
   local_port="$(node_value "$tag" "port")"
   pid_file="${RUNTIME_DIR}/${tag}.pid"
   log_file="${LOG_DIR}/${tag}.cloudflared.log"
@@ -202,11 +236,9 @@ start_temp_tunnel() {
   fi
   json_set_field "${NODES_FILE}" "${tag}" "endpoint_domain" "" 2>/dev/null || true
   release_lock
-  edge_ip="$(argo_edge_ip_version)"
-  # --protocol http2：压掉 QUIC 内存尖峰；追加模式写入（O_APPEND）避免轮转后稀疏文件
-  nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" --url "http://127.0.0.1:${local_port}" \
-    >>"${log_file}" 2>&1 </dev/null &
-  tmp_pid=$!
+  # XR-12：复用 launch_cloudflared，避免 watchdog 与 argo.sh 参数漂移
+  launch_cloudflared "${log_file}" "" --url "http://127.0.0.1:${local_port}"
+  tmp_pid="${CLOUDFLARED_LAST_PID}"
   write_pid_file "${pid_file}" "${tmp_pid}"
 
   # 域名需通过公共 DNS 发布确认（DoH）才写入节点，防止"看似成功实则不可解析"；
@@ -240,7 +272,7 @@ start_temp_tunnel() {
 
 start_token_tunnel() {
   local tag="$1"
-  local token pid_file log_file edge_ip
+  local token pid_file log_file
   token="$(secret_value "$tag" "argo_token")"
   if [ -z "${token}" ]; then
     print_warn "节点 ${tag} 的 Argo Token 为空，已跳过启动。"
@@ -251,11 +283,9 @@ start_token_tunnel() {
 
   : >"${log_file}"
   chmod 600 "${log_file}"
-  edge_ip="$(argo_edge_ip_version)"
   # token 经环境变量传入，避免明文出现在进程命令行（ps 可见）
-  TUNNEL_TOKEN="${token}" nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" run \
-    >>"${log_file}" 2>&1 </dev/null &
-  write_pid_file "${pid_file}" "$!"
+  launch_cloudflared "${log_file}" "${token}" run
+  write_pid_file "${pid_file}" "${CLOUDFLARED_LAST_PID}"
   date +%s >"${RUNTIME_DIR}/${tag}.started_at" 2>/dev/null || true
 }
 

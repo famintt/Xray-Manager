@@ -217,6 +217,8 @@ add_vless_argo() {
 }
 
 add_tuic() {
+  # XR-07：交互新增同样受限（一个 sidecar 进程只能监听一个端口）
+  aux_singleton_available "tuic-v5" "$(generate_tag "tuic-v5")" || return 1
   local tag port name uuid password tls_server cert_bundle cert_mode cert_file key_file node_json secret_json
   ensure_singbox_ready
   ensure_tuic_core || fatal "官方 tuic-server 安装失败。"

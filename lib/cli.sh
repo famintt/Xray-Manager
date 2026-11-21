@@ -48,6 +48,11 @@ main() {
     require_root
     cli_status
     ;;
+  restart)
+    require_root
+    [ "$#" -eq 1 ] || { print_err "用法: xm restart"; return 2; }
+    restart_stack
+    ;;
   doctor)
     require_root
     cli_doctor || exit 1
@@ -90,15 +95,7 @@ main() {
     ;;
   restore)
     require_root
-    init_storage
-    acquire_lock
-    if restore_latest_backup; then
-      reconcile_state || true
-      render_config
-      start_service
-      print_ok "已恢复并重启服务。"
-    fi
-    release_lock
+    restore_stack
     ;;
   un)
     require_root

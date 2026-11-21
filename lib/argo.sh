@@ -333,9 +333,29 @@ stop_argo_node() {
   kill_pid_file "${BASE_DIR}/runtime/${tag}.pid" "${CLOUDFLARED_BIN}"
 }
 
+# XR-12：cloudflared 启动参数（边缘 IPv4、HTTP/2、内存上限）原先散落三份实现，
+# 任一处漏改就会出现"同一台机器两种行为"。统一从这里启动，调用方只负责
+# 传日志、token（可选）与隧道子参数；PID 通过 CLOUDFLARED_LAST_PID 回传。
+launch_cloudflared() {
+  local log_file="$1" token="$2"
+  shift 2
+  local mem_limit
+  local -a env_prefix=() args=(tunnel --no-autoupdate --protocol http2 --edge-ip-version "$(argo_edge_ip_version)")
+  [ -z "${token}" ] || env_prefix+=(TUNNEL_TOKEN="${token}")
+  mem_limit="$(go_mem_limit_value 2>/dev/null || true)"
+  [ -z "${mem_limit}" ] || env_prefix+=(GOMEMLIMIT="${mem_limit}")
+  args+=("$@")
+  if [ "${#env_prefix[@]}" -gt 0 ]; then
+    nohup env "${env_prefix[@]}" "${CLOUDFLARED_BIN}" "${args[@]}" >>"${log_file}" 2>&1 </dev/null &
+  else
+    nohup "${CLOUDFLARED_BIN}" "${args[@]}" >>"${log_file}" 2>&1 </dev/null &
+  fi
+  CLOUDFLARED_LAST_PID="$!"
+}
+
 start_argo_node() {
   local tag="$1"
-  local mode port token log_file pid_file domain edge_ip
+  local mode port token log_file pid_file domain
 
   [ -x "${CLOUDFLARED_BIN}" ] || install_cloudflared_bin
   mode="$(node_value "$tag" "argo_mode")"
@@ -354,15 +374,11 @@ start_argo_node() {
     json_set_field "${NODES_FILE}" "${tag}" "endpoint_domain" "" 2>/dev/null || true
   fi
 
-  edge_ip="$(argo_edge_ip_version)"
-
   if [ "${mode}" = "token" ]; then
     token="$(secret_value "$tag" "argo_token")"
     # token 经环境变量传入，避免明文出现在进程命令行（ps 可见）
-    # --protocol http2：压掉 QUIC 内存尖峰（30-50MB → 25-40MB），小内存机更稳
-    TUNNEL_TOKEN="${token}" nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" run \
-      >>"${log_file}" 2>&1 </dev/null &
-    write_pid_file "${pid_file}" "$!"
+    launch_cloudflared "${log_file}" "${token}" run
+    write_pid_file "${pid_file}" "${CLOUDFLARED_LAST_PID}"
     date +%s >"${BASE_DIR}/runtime/${tag}.started_at" 2>/dev/null || true
     # L13：token 模式下 cloudflared 全程静默（无 trycloudflare 域名可展示），
     # 对 endpoint_domain:443 快速探测一次给安装者即时反馈；刚启动时公网解析未就绪
@@ -375,9 +391,8 @@ start_argo_node() {
     return 0
   fi
 
-  nohup "${CLOUDFLARED_BIN}" tunnel --no-autoupdate --protocol http2 --edge-ip-version "${edge_ip}" --url "http://127.0.0.1:${port}" \
-    >>"${log_file}" 2>&1 </dev/null &
-  local _pid=$!
+  launch_cloudflared "${log_file}" "" --url "http://127.0.0.1:${port}"
+  local _pid="${CLOUDFLARED_LAST_PID}"
   write_pid_file "${pid_file}" "${_pid}"
 
   # 等待域名出现且确认公共 DNS 已发布（DoH 核验，防"看似成功实则不可解析"）；

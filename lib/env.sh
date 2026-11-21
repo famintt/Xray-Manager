@@ -43,6 +43,8 @@ COLOR_RESET="\033[0m"
 COLOR_NUM_HL="\033[1;92m"
 
 LOCK_HELD=false
+# XR-12：launch_cloudflared 回传最近一次 cloudflared PID（避免用全局 $! 猜）
+CLOUDFLARED_LAST_PID=""
 LOCK_FD=""
 LOCK_DIR_FALLBACK="${LOCK_FILE}.d"
 PUBLIC_IP_CACHE="${PUBLIC_IP_CACHE:-}"
@@ -142,10 +144,17 @@ handle_common_error() {
   print_err "命令执行失败：${source_file}:${line_no}"
   # 事务回滚（auto_install 的 rep 窗口）：已清空旧节点但尚未提交时，
   # 失败必须恢复备份，避免停留"旧节点消失、新配置未启动"的不一致状态（F-02）
+  # A07：子 shell（$(...) / 管道 / 后台任务）继承 LOCK_HELD 与 _AUTO_ROLLBACK_DIR，
+  # 但它们不拥有事务：既不能回滚，也不能释放父进程的锁，否则父流程会在无锁下继续写状态。
+  if declare -F lock_owned_by_self >/dev/null 2>&1 && ! lock_owned_by_self; then
+    print_err "子进程失败（不持有锁，已跳过回滚与解锁）。"
+    exit "${exit_code}"
+  fi
   if [ -n "${_AUTO_ROLLBACK_DIR:-}" ] && [ -d "${_AUTO_ROLLBACK_DIR}" ]; then
     print_err "检测到未提交的 rep 事务，正在自动恢复到安装前状态..."
+    local rollback_dir="${_AUTO_ROLLBACK_DIR}"
     _AUTO_ROLLBACK_DIR=""
-    restore_latest_backup || true
+    restore_snapshot "${rollback_dir}" || restore_latest_backup || true
     reconcile_state || true
     render_config || true
     start_service || true

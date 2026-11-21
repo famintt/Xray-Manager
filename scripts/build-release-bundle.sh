@@ -39,6 +39,10 @@ chmod 0755 "${PACKAGE_DIR}/xm.sh" "${PACKAGE_DIR}/mtp.sh" "${PACKAGE_DIR}/script
 # --mode='go-w'：MSYS/Git-Bash 的 chmod 是假权限（可写文件一律假到 0777），
 # 会随文件进归档（v1.5.8 审查 L-1）；此处统一剥掉组/其他写位——Linux 下对已
 # chmod 好的 0644/0755 无影响，Windows 下 0777 归一为 0755。安装期权限由
+# XR-16：仓库内 install.sh.sha256 供 CI/人工比对；发布前重新生成，避免"仓库哈希
+# 说的是一版、Release 里是另一版"（sbm 审计时 SUPPLY-01 就是这么发现的）。
+( cd "${ROOT_DIR}" && sha256sum install.sh | awk '{print $1"  install.sh"}' >install.sh.sha256 )
+
 # install.sh 的 install -m/umask 077 最终收敛，归档模式仅影响浏览及临时解包窗口。
 tar --format=gnu --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
   --mode='go-w' \

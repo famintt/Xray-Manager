@@ -237,7 +237,8 @@ install_xray_core() {
   unzip -q "${archive}" -d "${tmpdir}"
   binary="$(find "${tmpdir}" -type f -name xray | head -n 1)"
   [ -n "${binary}" ] || fatal "安装包中未找到 xray 可执行文件。"
-  install -m 0755 "${binary}" "${XRAY_BIN}"
+  # A08：整版本原子替换——直接 install 覆盖会在中断时留下半个二进制
+  install_atomic "${binary}" "${XRAY_BIN}" 0755
   ensure_binary_runs "${XRAY_BIN}" "xray" version
   rm -rf "${tmpdir}"
   print_ok "xray 已安装到 ${XRAY_BIN}"
@@ -393,6 +394,12 @@ update_script() {
     latest_tag="$(curl -fsSL --retry 2 --max-time 20 "https://data.jsdelivr.com/v1/package/gh/${REPO_OWNER}/${REPO_NAME}" 2>/dev/null | jq -r '.versions[]? | select(type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' 2>/dev/null | head -n 1 || true)"
     [ -n "${latest_tag}" ] && print_info "GitHub API 不可用，已经 jsdelivr 获取最新版本：${latest_tag}"
   fi
+  # XR-14：API 返回的 tag_name 未校验就拼进下载 URL；异常 tag（二进制镜像等）
+  # 会拼出错误地址甚至路径穿越。只接受 vX.Y.Z。
+  if [ -n "${latest_tag}" ] && ! [[ "${latest_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    print_err "最新发布版本号异常（${latest_tag}），已取消更新。"
+    return 1
+  fi
   [ -n "${latest_tag}" ] || {
     print_err "无法获取最新发布版本（GitHub API 与 jsdelivr 均不可用）。"
     return 1
@@ -434,8 +441,6 @@ uninstall_project() {
 
   stop_service || true
   sub_stop || true
-  socks5_whitelist_cleanup || true
-  if command_exists pkill; then pkill -x darkhttpd >/dev/null 2>&1 || true; fi
 
   if systemd_available; then
     systemctl disable --now "${WATCHDOG_TIMER_NAME}" >/dev/null 2>&1 || true
@@ -451,8 +456,13 @@ uninstall_project() {
     (crontab -l 2>/dev/null | grep -Fv "${WATCHDOG_TARGET}" | grep -Fv "no crontab for" || true) | crontab -
   fi
 
+  # XR-14：只清本实例资源。原先还会 pkill -x darkhttpd（会杀掉同机其他实例的
+  # 订阅服务），漏删 sidecar 与网络调优文件（重装后残留旧二进制/旧 sysctl）。
   rm -rf "${BASE_DIR}" "${LIB_DIR}" "${INSTALL_BIN}" "${XRAY_BIN}"
+  rm -f "${TUIC_BIN}" "${HYSTERIA_BIN}" "${NET_TUNE_SYSCTL_FILE}" 2>/dev/null || true
+  rm -f "${MTP_BIN:-/usr/local/bin/mtp}" 2>/dev/null || true
   print_info "保留 cloudflared（可能被其他项目共用）。"
+  # 锁从外置目录持有：先删本项目目录再解锁，避免删到一半被新进程拿到锁
   release_lock
   print_ok "项目已卸载。"
   return 0

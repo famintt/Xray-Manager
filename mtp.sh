@@ -19,7 +19,7 @@ set -eEuo pipefail
 #   mtp_ip_mode   监听模式 v4 / v6 / dual（可选，默认 v4）
 ###############################################################################
 
-SCRIPT_VERSION="1.1.3"
+SCRIPT_VERSION="1.2.0"
 
 # bash>=4.0 前置守卫：MTP_SHA256 关联数组与 ${!var} 间接引用在 bash 3.x 不可用，
 # 尽早失败并给出可读报错（xm.sh 侧同款要求，见 require_bash4）。
@@ -180,9 +180,10 @@ generate_secret() {
 }
 
 random_domain() {
-  # 用 date 纳秒对内置列表长度取模，纯 bash 无竞态
+  # BUG-05：date +%s%N 在 BusyBox/部分 libc 下不输出纳秒（恒为 0），会永远取第一个域名；
+  # RANDOM 是 bash 内置，跨平台一致。
   local idx
-  idx=$(($(date +%s%N) % ${#MTP_FAKE_DOMAINS[@]}))
+  idx=$((RANDOM % ${#MTP_FAKE_DOMAINS[@]}))
   printf '%s' "${MTP_FAKE_DOMAINS[$idx]}"
 }
 
@@ -228,13 +229,25 @@ print_usage() {
 EOF
 }
 
+# SEC-02：secret 必须是 32 位十六进制（0xee + 16 字节的 Telegram 格式），
+# 在拼进 shell 命令/服务模板之前先校验，避免命令注入与非法配置。
+is_hex_secret32() { [[ "$1" =~ ^[0-9a-fA-F]{32}$ ]]; }
+
+# SEC-02：伪装域名必须是合法 DNS 名（RFC1123 子集，长度 ≤253）。
+is_safe_domain_name() {
+  local d="$1"
+  [ -n "${d}" ] && [ "${#d}" -le 253 ] || return 1
+  [[ "${d}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]
+}
+
 # 生成 tg:// 链接 secret（与上游 show_info_mtg 一致：
 # FULL_SECRET = 0xee + secret(32hex 16字节) + domain 字节串，base64 url-safe 无 padding）
 mtp_tg_secret() {
   local secret="$1" domain="$2"
   local raw secret_b64
   raw="$(echo -n "${secret}" | sed 's/../\\x&/g')"
-  secret_b64="$(printf '\xee%b%b' "${raw}" "${domain}" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '=')"
+  # SEC-02：域名只做字面拼接，绝不能走 %b（会把 \c 之类的转义序列解释成控制字符）
+  secret_b64="$(printf '\xee'; printf '%b' "${raw}"; printf '%s' "${domain}" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '=')"
   printf '%s' "${secret_b64}"
 }
 
@@ -368,8 +381,11 @@ EOF
     rc-update add "${MTP_SERVICE}" default >/dev/null 2>&1 || true
     rc-service "${MTP_SERVICE}" restart
   else
-    # 无服务管理器：后台运行并写 pidfile（尽力而为）
-    nohup sh -c "${cmd_line} >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
+    # SEC-02/BUG-06：无服务管理器时也不能用 sh -c 拼字符串（secret 会经 shell 解析）。
+    # 直接以数组启动，pid 才是真正的 mtg-go 进程。
+    local -a _argv
+    read -r -a _argv <<<"$(mtp_run_args "${port}" "${full_secret}" "${ip_mode}")"
+    nohup "${MTP_BIN_DIR}/mtg-go" "${_argv[@]}" >>"${MTP_LOG}" 2>&1 </dev/null &
     echo $! >"${MTP_WORKDIR}/mtp.pid"
     mtp_print_warn "未检测到 systemd/openrc，已用 nohup 后台运行（pid: $(cat "${MTP_WORKDIR}/mtp.pid")）。"
   fi
@@ -459,6 +475,17 @@ mtp_install() {
   [ -n "${domain}" ] || domain="$(random_domain)"
   [ -n "${secret}" ] || secret="$(generate_secret)"
 
+  # SEC-02：把用户输入挡在落盘/拼命令之前。旧实现直接信任 mtp_secret/mtp_domain，
+  # 任意字符串都会进入 ExecStart 与 shell 命令。
+  if ! is_hex_secret32 "${secret}"; then
+    mtp_print_err "mtp_secret 必须是 32 位十六进制字符串（长度 ${#secret}）。"
+    return 1
+  fi
+  if ! is_safe_domain_name "${domain}"; then
+    mtp_print_err "mtp_domain 不是合法域名：${domain}"
+    return 1
+  fi
+
   case "${mtp_ip_mode:-v4}" in
   v4 | v6 | dual) ip_mode="${mtp_ip_mode:-v4}" ;;
   *)
@@ -502,7 +529,9 @@ mtp_restart() {
     if [ -f "${MTP_WORKDIR}/mtp.pid" ]; then
       kill "$(cat "${MTP_WORKDIR}/mtp.pid")" >/dev/null 2>&1 || true
     fi
-    nohup sh -c "${MTP_BIN_DIR}/mtg-go $(mtp_run_args) >>${MTP_LOG} 2>&1" >/dev/null 2>&1 &
+    local -a _argv
+    read -r -a _argv <<<"$(mtp_run_args)"
+    nohup "${MTP_BIN_DIR}/mtg-go" "${_argv[@]}" >>"${MTP_LOG}" 2>&1 </dev/null &
     echo $! >"${MTP_WORKDIR}/mtp.pid"
     mtp_print_ok "已重启 ${MTP_SERVICE}（pid: $(cat "${MTP_WORKDIR}/mtp.pid")）。"
     ;;

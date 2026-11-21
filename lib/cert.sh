@@ -85,6 +85,22 @@ ensure_tls_material() {
 # 支持 DNS 通配证书（DNS:*.example.com 匹配 foo.example.com）。
 # 用于分享链接跳过校验判定：证书主体不覆盖链接 SNI 时（如自定义证书 +
 # 伪装 SNI），客户端对证书的常规校验必然失败，必须追加 insecure/pinSHA256。
+# sidecar 证书校验：TUIC/Hysteria2 直接吃 cert/key 文件，若两者不是一对
+# （重新生成证书后旧私钥残留、import 时配错文件），进程会起得来但握手必失败，
+# 客户端只看到超时。渲染前先用 openssl 比对公钥。
+validate_certificate_pair() {
+  local cert="${1:-}" key="${2:-}" cpub kpub
+  [ -n "${cert}" ] && [ -n "${key}" ] || return 1
+  [ -s "${cert}" ] && [ -s "${key}" ] || return 1
+  grep -q 'BEGIN CERTIFICATE' "${cert}" 2>/dev/null || return 1
+  grep -qE 'BEGIN ([A-Z]+ )?PRIVATE KEY' "${key}" 2>/dev/null || return 1
+  command_exists openssl || return 0
+  cpub="$(openssl x509 -in "${cert}" -noout -pubkey 2>/dev/null || true)"
+  kpub="$(openssl pkey -in "${key}" -pubout 2>/dev/null || true)"
+  [ -n "${cpub}" ] && [ -n "${kpub}" ] || return 1
+  [ "${cpub}" = "${kpub}" ]
+}
+
 cert_covers_host() {
   local cert_file="$1" host="$2"
   [ -f "${cert_file}" ] || return 1

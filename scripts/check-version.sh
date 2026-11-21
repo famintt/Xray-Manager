@@ -80,6 +80,14 @@ if ! diff -q interface/worker.js "${tmp_iface}/worker.js" >/dev/null; then
 fi
 rm -rf "${tmp_iface}"
 
+# XR-16：仓库根的 install.sh.sha256 必须与当前 install.sh 一致（陈旧值会让
+# "校验下载"这一步形同虚设）。
+if [ -f install.sh.sha256 ]; then
+  want_inst="$(awk '{print $1}' install.sh.sha256 | tr -d '\r')"
+  have_inst="$(sha256sum install.sh | awk '{print $1}')"
+  [ "${want_inst}" = "${have_inst}" ] || fail "install.sh.sha256 与 install.sh 不一致（${want_inst:0:12} != ${have_inst:0:12}）"
+fi
+
 raw_hash="$(gzip -dc "dist/${bundle_name}" | sha256sum | awk '{print $1}')"
 rm -rf dist
 echo "一致性校验通过：v${version_file} / ${actual:0:12}..."

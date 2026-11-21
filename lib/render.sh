@@ -135,8 +135,12 @@ render_config() {
   fi
   if ! xray_validate_config "${cfg_tmp}"; then
     if [ "${XM_DEBUG_RENDER:-0}" = "1" ]; then
-      cp -f "${cfg_tmp}" /tmp/xm-failed-config.json || true
-      "${XRAY_BIN}" run -test -c "${cfg_tmp}" 2>/tmp/xm-validate.err || true
+      # XR-15：/tmp 是全局可读可写目录，失败的配置里含私钥与 UUID，
+      # 且固定文件名会被其它用户预先占位（符号链接攻击）。改到 0700 日志目录。
+      cp -f "${cfg_tmp}" "${LOG_DIR}/failed-config.json" 2>/dev/null || true
+      chmod 600 "${LOG_DIR}/failed-config.json" 2>/dev/null || true
+      "${XRAY_BIN}" run -test -c "${cfg_tmp}" 2>"${LOG_DIR}/validate.err" || true
+      chmod 600 "${LOG_DIR}/validate.err" 2>/dev/null || true
     fi
     rm -f "${tmp}" "${cfg_tmp}"
     print_err "Xray 配置校验失败，已拒绝覆盖现有配置。"
@@ -182,6 +186,9 @@ node_meta_array() {
 _vless_inbound() {
   local tag="$1" name="$2" port="$3" uuid="$4" network="$5" security="$6"
   local sni="$7" path="$8" private_key="$9" short_id="${10}" cert_file="${11}" key_file="${12}" flow="${13}" xhttp_scope="${14:-direct}"
+  # XR-09：Argo 入站只有 cloudflared 回源会连，默认只绑本机回环；
+  # 直连/Reality/CDN 走公网口。listen_addr 由调用方按传输决定。
+  local listen_addr="${15:-0.0.0.0}"
   local short_ids_json='[]' alpn_json='["h2","http/1.1"]' stream='{}' client='{}' sockopt_json
   [ -n "${flow}" ] && client="$(jq -n --arg u "$uuid" --arg n "$name" --arg f "$flow" '{id:$u,name:$n,flow:$f}')" || client="$(jq -n --arg u "$uuid" --arg n "$name" '{id:$u,name:$n}')"
   [ -n "${short_id}" ] && short_ids_json="$(printf '%s' "$short_id" | jq -R 'split(",")|map(select(.!=""))')"
@@ -203,8 +210,8 @@ _vless_inbound() {
   else
     stream="$(printf '%s' "$stream" | jq '. + {security:"none"}')"
   fi
-  jq -n --arg tag "$tag" --argjson port "$port" --argjson client "$client" --argjson stream "$stream" '{
-    tag:$tag, listen:"0.0.0.0", port:$port, protocol:"vless",
+  jq -n --arg tag "$tag" --arg listen_addr "$listen_addr" --argjson port "$port" --argjson client "$client" --argjson stream "$stream" '{
+    tag:$tag, listen:$listen_addr, port:$port, protocol:"vless",
     settings:{clients:[$client],decryption:"none"},
     streamSettings:$stream
   }'
@@ -237,7 +244,8 @@ render_inbound_for_tag() {
       network="${protocol#vless-}"; network="${network%-argo}"
       # XHTTP over Argo: Cloudflare 回源会保留 Host，服务端必须与客户端 host 一致。
       sni="${endpoint_domain:-}"
-      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" none "$sni" "$ws_path" "" "" "" "" "" "argo" ;;
+      # XR-09：无 TLS 的 Argo 入站不得对公网裸奔（UUID 认证不足以防扫描/爆破）。
+      _vless_inbound "$tag" "$name" "$port" "$uuid" "$network" none "$sni" "$ws_path" "" "" "" "" "" "argo" "127.0.0.1" ;;
     tuic-v5|hy2)
       # 官方 TUIC v5 / Hysteria2 由 sidecar 核心处理，不写入 Xray 配置。
       return 0 ;;

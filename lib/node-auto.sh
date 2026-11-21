@@ -34,13 +34,23 @@ tls_sni_auto() {
       printf '%s' "${fallback}"
       return 0
     fi
-    if [ -n "${TLS_SNI_AUTO_CACHE:-}" ]; then
-      printf '%s' "${TLS_SNI_AUTO_CACHE}"
+    # A07：原实现把结果写进 shell 变量，而调用点在 $(...) 子 shell 里，
+    # 赋值出不了子 shell，一次 rep 会重复探测 4-8 次（每次 10-60 秒）。
+    # 缓存落盘后同一轮所有 SNI 复用一次探测结果。
+    local cache_file="${RUNTIME_DIR}/tls_sni_auto.cache" cached=""
+    if [ -f "${cache_file}" ]; then
+      cached="$(tr -d ' \r\n' <"${cache_file}" 2>/dev/null || true)"
+    fi
+    if [ -n "${cached}" ]; then
+      printf '%s' "${cached}"
       return 0
     fi
     print_info "正在检测 TLS SNI（TLS 1.3 + HTTP/2，自签证书）..." >&2
-    TLS_SNI_AUTO_CACHE="$(detect_sni_best 2>/dev/null || printf '%s' "${fallback}")"
-    printf '%s' "${TLS_SNI_AUTO_CACHE}"
+    cached="$(detect_sni_best 2>/dev/null || printf '%s' "${fallback}")"
+    [ -n "${cached}" ] || cached="${fallback}"
+    printf '%s' "${cached}" >"${cache_file}" 2>/dev/null || true
+    print_info "TLS SNI 检测结果：${cached}（已缓存，rep 时可用 cert=self 复用）" >&2
+    printf '%s' "${cached}"
     ;;
   *)
     env_domain_or_default "${key}" "${fallback}"
@@ -137,6 +147,11 @@ auto_add_cdn() {
   *) path="$(env_var "xhttp_path")"; path="${path:-/$(generate_hex 4)}" ;;
   esac
   local cdn_port="${ENV_CDN_PORT:-443}"
+  # XR-08：cdn_port 直接进分享链接与节点表，必须拦住非数字/越界值
+  if ! [[ "${cdn_port}" =~ ^[0-9]{1,5}$ ]] || [ "${cdn_port}" -lt 1 ] || [ "${cdn_port}" -gt 65535 ]; then
+    print_warn "cdn_port=${cdn_port} 非法，已回退 443。"
+    cdn_port=443
+  fi
   cert_bundle="$(auto_cert_bundle "$tag" "$sni")"
   cert_mode="${cert_bundle%%|*}"
   cert_file="${cert_bundle#*|}"
@@ -190,6 +205,9 @@ auto_add_argo() {
 auto_add_tuic() {
   local port="$1" tag uuid password cert_bundle cert_mode cert_file key_file node_json secret_json
   tag="$(generate_tag "tuic-v5")"
+  # XR-07：官方 tuic-server 一个进程只监听一个端口。旧实现允许写入多个 TUIC 节点，
+  # 直到 render/启动阶段才报错，此时节点已落盘、订阅已上报（半成品状态）。
+  aux_singleton_available "tuic-v5" "${tag}" || return 1
   uuid="${ENV_UUID:-$(generate_uuid)}"
   password="${ENV_PASSWD:-$(generate_hex 8)}"
   cert_bundle="$(auto_cert_bundle "$tag" "${ENV_TU_SNI}")"
@@ -206,9 +224,18 @@ auto_add_tuic() {
 
 auto_add_hy2() {
   local port="$1" tag uuid password cert_bundle cert_mode cert_file key_file node_json secret_json
+  local up_mbps down_mbps
   tag="$(generate_tag "hy2")"
+  # XR-07：同上，Hysteria2 也是单监听进程
+  aux_singleton_available "hy2" "${tag}" || return 1
   uuid=""
   password="${ENV_PASSWD:-$(generate_hex 8)}"
+  # XR-08：Hysteria2 带宽必须可由环境变量约束（不填则留空由服务端自适应），
+  # 旧实现固定写 0，用户设 hy_up/hy_down 也无效。
+  up_mbps="$(env_var "hy_up")"; up_mbps="${up_mbps:-0}"
+  down_mbps="$(env_var "hy_down")"; down_mbps="${down_mbps:-0}"
+  [[ "${up_mbps}" =~ ^(0|[1-9][0-9]{0,8})$ ]] || up_mbps=0
+  [[ "${down_mbps}" =~ ^(0|[1-9][0-9]{0,8})$ ]] || down_mbps=0
   cert_bundle="$(auto_cert_bundle "$tag" "${ENV_HY_SNI}")"
   cert_mode="${cert_bundle%%|*}"
   cert_file="${cert_bundle#*|}"
@@ -218,7 +245,7 @@ auto_add_hy2() {
     --arg protocol "hy2" --arg name "$(auto_node_name "HY2")" --argjson port "$port" \
     --arg tls_server "${ENV_HY_SNI}" --arg certificate_mode "$cert_mode" \
     --arg certificate_path "$cert_file" --arg key_path "$key_file" \
-    --argjson up_mbps 0 --argjson down_mbps 0 \
+    --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" \
     '{protocol:$protocol,name:$name,port:$port,tls_server:$tls_server,
       certificate_mode:$certificate_mode,certificate_path:$certificate_path,
       key_path:$key_path,up_mbps:$up_mbps,down_mbps:$down_mbps}')"
@@ -322,7 +349,7 @@ auto_install() {
   if [ "${added}" -eq 0 ]; then
     _AUTO_ROLLBACK_DIR=""
     if [ "${action}" = "rep" ]; then
-      restore_latest_backup || true
+      restore_snapshot "${backup_dir:-}" || restore_latest_backup || true
       reconcile_state || true
       render_config || true
       start_service || true
@@ -341,13 +368,19 @@ auto_install() {
   cleanup_unused_cloudflared || true
 
   case "$(env_var "sub")" in 1 | on | yes | true) set_setting "sub_enabled" "1" || true ;; esac
+  # BUG-07：未显式传 sub_mode 时不得把已有 worker 配置覆写成 temp（重装一次
+  # 就丢掉固定订阅域名），仅在显式传入时切换模式。
   case "$(env_var "sub_mode")" in
   worker)
     set_setting "sub_mode" "worker" || true
     set_setting "sub_domain" "$(env_var "sub_domain")" || true
     set_setting "sub_token" "$(env_var "sub_token")" || true
+    [ -n "$(env_var "sub_report_token")" ] && set_setting "sub_report_token" "$(env_var "sub_report_token")" || true
+    [ -n "$(env_var "sub_read_token")" ] && set_setting "sub_read_token" "$(env_var "sub_read_token")" || true
     set_setting "sub_machine" "$(env_var "sub_machine")" || true
     ;;
+  temp) set_setting "sub_mode" "temp" || true ;;
+  "") ;;
   *) set_setting "sub_mode" "temp" || true ;;
   esac
   if sub_enabled; then sub_start || print_warn "订阅链接启动失败，可稍后在菜单/命令行重试。"; fi

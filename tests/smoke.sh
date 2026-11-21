@@ -7,7 +7,21 @@ cd "${ROOT}"
 export XM_TEST_MODE=1
 export BASE_DIR="${BASE_DIR:-/tmp/xm-smoke-state}"
 export LIB_DIR="${LIB_DIR:-${BASE_DIR}/lib}"
-export XRAY_BIN="${XRAY_BIN:-/mnt/d/AI/DSH/.sbm_test/xray-linux/xray}"
+# XR-18：旧值写死作者本机的 WSL 路径，换机器/换用户的 CI 直接失败。
+# 优先用调用方传入的 XRAY_BIN，其次仓库内 tests/bin/xray，最后退回 PATH。
+if [ -z "${XRAY_BIN:-}" ]; then
+  if [ -x "${ROOT}/tests/bin/xray" ]; then
+    XRAY_BIN="${ROOT}/tests/bin/xray"
+  elif [ -x "/mnt/d/AI/DSH/.sbm_test/xray-linux/xray" ]; then
+    # 开发机便捷路径（WSL 下的源码仓库同盘缓存；不存在时继续回退）
+    XRAY_BIN="/mnt/d/AI/DSH/.sbm_test/xray-linux/xray"
+  elif command -v xray >/dev/null 2>&1; then
+    XRAY_BIN="$(command -v xray)"
+  else
+    XRAY_BIN="/usr/local/bin/xray"
+  fi
+fi
+export XRAY_BIN
 export TUIC_BIN="${TUIC_BIN:-/bin/true}"
 export HYSTERIA_BIN="${HYSTERIA_BIN:-/bin/true}"
 unset XM_XHTTP_MODE
@@ -27,7 +41,7 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], actual [$2])"; fi; }
 check_contains() { if printf '%s' "$2" | grep -Fq "$3"; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v1.1.3"
+check_eq "版本" "$(cat VERSION)" "v1.2.0"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -89,7 +103,13 @@ render_config
 check_eq "Xray inbounds 数量" "$(jq '.inbounds|length' "${CONFIG_FILE}")" "9"
 if "$XRAY_BIN" run -test -c "${CONFIG_FILE}" >/tmp/xm-xray-test.out 2>&1; then pass "Xray 配置校验"; else fail "Xray 配置校验: $(tail -3 /tmp/xm-xray-test.out)"; fi
 check_contains "TUIC 配置" "$(cat "${TUIC_CONFIG_FILE}")" '"users"'
-check_contains "Hysteria 配置" "$(cat "${HYSTERIA_CONFIG_FILE}")" 'type: password'
+# Hysteria 读 YAML，但配置由 jq 生成（JSON 是合法 YAML 子集）；
+# 早期断言按 YAML 裸文本写死，生成方式改为 jq 后失效，这里按语义判定。
+if jq -e '.auth.type == "password" and (.tls.cert|type=="string") and (.listen|test("^:[0-9]+$"))' "${HYSTERIA_CONFIG_FILE}" >/dev/null 2>&1; then
+  pass "Hysteria 配置"
+else
+  fail "Hysteria 配置: $(cat "${HYSTERIA_CONFIG_FILE}" | head -5)"
+fi
 
 set_setting server_ip 203.0.113.10
 links="$(for tag in p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11; do build_share_link "$tag"; printf '\n'; done)"
@@ -123,6 +143,33 @@ unset tupt
 export argo_mode=token endpoint_domain=argo.example.com argo_token=test-token
 export ENV_UUID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb ENV_NAME=token-test
 export ENV_ARGO_CDN_HOST=cf.example.com ENV_CDN_HOST=cdn.example.com ENV_ARGO_CDN_PORT=443
+# XR-09：Argo 入站不得监听公网（cloudflared 回源只连 127.0.0.1）
+if jq -e '.[] | select(.protocol == "vless-xhttp-argo")' "${NODES_FILE}" >/dev/null 2>&1; then
+  in_argo="$(render_inbound_for_tag "$(jq -r 'to_entries[] | select(.value.protocol=="vless-xhttp-argo") | .key' "${NODES_FILE}" | head -n1)")"
+  if [ "$(printf '%s' "${in_argo}" | jq -r '.listen')" = "127.0.0.1" ]; then
+    pass "Argo 入站只绑本机"
+  else
+    fail "Argo 入站监听 0.0.0.0"
+  fi
+fi
+
+# XR-07：第二个 TUIC/HY2 必须在写节点前被拒绝
+if aux_singleton_available "tuic-v5" "tuic-second" >/dev/null 2>&1; then
+  fail "aux_singleton_available 未拦截第二个 TUIC"
+else
+  pass "aux_singleton_available 拦截重复 TUIC"
+fi
+
+# XR-15：调试产物不得落到 /tmp
+if grep -q '/tmp/xm-' lib/render.sh; then
+  fail "render.sh 仍有 /tmp 调试产物"
+else
+  pass "调试产物不落 /tmp"
+fi
+
+# XR-16：发布摘要门禁文件存在
+if [ -f install.sh.sha256 ]; then pass "install.sh.sha256 存在"; else fail "缺少 install.sh.sha256"; fi
+
 auto_add_argo 21012 >/dev/null 2>&1
 if jq -e '.[] | select(.protocol == "vless-xhttp-argo" and .argo_mode == "token" and .endpoint_domain == "argo.example.com" and .preferred_domain == "cf.example.com")' "${NODES_FILE}" >/dev/null; then
   pass "auto_add_argo token 模式"
