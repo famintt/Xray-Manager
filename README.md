@@ -106,6 +106,15 @@ name='HK' xm rep
 - TUIC v5 使用 `uuid` + `password`；Hysteria2 使用 `password`；默认自签证书，复用 SNI。
 - 两个 sidecar 不创建独立 systemd unit，由 `xm` 启动流程和 watchdog 管理。
 
+## 网络调优
+
+默认启用 `BBR + fq`，不测速、不按带宽推断：
+
+- TCP 缓冲按内存：`<256MB` 用 16MB，`>=256MB` 用 32MB。
+- `tcp_mem` 按 `max=min(RAM/4,128MB)`（下限 16MB）、`low=max/4`、`pressure=max/2`。
+- 收发默认 256KB，并设置 `netdev_max_backlog=8192`、`somaxconn=4096`、`tcp_max_syn_backlog=8192`、`tcp_fastopen=3`、`tcp_mtu_probing=1`、`tcp_tw_reuse=1`、`ip_local_port_range=10000 65535`、`tcp_slow_start_after_idle=0`；不设 `tcp_notsent_lowat`。
+- 持久化到 `/etc/sysctl.d/99-xray-manager-net-tune.conf`；菜单 **8. BBR+FQ+统一网络调优** 可重新应用或查看当前值。
+
 ## 常用命令
 
 ```bash

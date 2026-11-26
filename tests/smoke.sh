@@ -43,7 +43,7 @@ check_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (expected [$3], a
 # printf 收到 SIGPIPE 会让整条管道返回 141，断言随机变红（本文件历史上多次偶发）。
 check_contains() { if [[ "$2" == *"$3"* ]]; then pass "$1"; else fail "$1 (missing [$3])"; fi; }
 
-check_eq "版本" "$(cat VERSION)" "v1.2.0"
+check_eq "版本" "$(cat VERSION)" "v1.2.1"
 check_contains "入口名称" "$(head -n 15 xm.sh)" "Xray 管理器"
 check_contains "UI 有 TUIC 卡" "$(cat interface/index.html)" 'id="tupt"'
 check_contains "UI 有 TUIC SNI" "$(cat interface/index.html)" 'id="tu_sni"'
@@ -217,6 +217,8 @@ check_eq "命名：小写机器名+Reality" "$(ENV_NAME=hk-yt auto_node_name Rea
 check_eq "命名：大小写机器名+XHTTP" "$(ENV_NAME=HK-YT auto_node_name XHTTP)" "HK-YT-XHTTP"
 check_eq "命名：TUIC" "$(ENV_NAME= auto_node_name TUIC)" "TUIC"
 check_eq "命名：XUDP" "$(ENV_NAME=MiXeD auto_node_name XUDP)" "MiXeD-XUDP"
+
+
 
 if [ "${FAIL}" -gt 0 ]; then
   printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
